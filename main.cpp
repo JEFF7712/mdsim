@@ -10,9 +10,9 @@
 
 // Parameters
 const int num_particles = 100; // Number of particles
-const double L = 100.0; // Box length for periodic boundaries 
-const double dt = 0.1; // Time step
-const double t_max = 100.0; // Maximum simulation time
+const double L = 6.0; // Box length for periodic boundaries 
+const double dt = 0.005; // Time step
+const double t_max = 10.0; // Maximum simulation time
 const double m = 1.0; // Particle mass
 enum class BoundaryCondition { PERIODIC, REFLECTIVE };
 const BoundaryCondition BC = BoundaryCondition::PERIODIC; // Boundary condition type
@@ -36,21 +36,35 @@ struct Particle {
     std::array<double, 3> velocity;
     std::array<double, 3> force;
 
-    Particle() {
-
-        // Initialize position and velocity with random values
-        static std::uniform_real_distribution<double> pos_dist(0.0, L);
-        static std::uniform_real_distribution<double> vel_dist(-10.0, 10.0);
-        auto& rng = get_rng();
-
-        position = {pos_dist(rng), pos_dist(rng), pos_dist(rng)};
-        velocity = {vel_dist(rng), vel_dist(rng), vel_dist(rng)};
-
-        // Initialize force to zero
-        force = {0.0, 0.0, 0.0};
-
-    }
+    Particle() : position{0,0,0}, velocity{0,0,0}, force{0,0,0} {}
 };
+
+void init_lattice(std::vector<Particle>& particles, double density) {
+    int n = particles.size();
+    int particles_per_side = std::ceil(std::cbrt(n));
+    double spacing = L / particles_per_side;
+
+    int idx = 0;
+    for (int x = 0; x < particles_per_side; ++x) {
+        for (int y = 0; y < particles_per_side; ++y) {
+            for (int z = 0; z < particles_per_side; ++z) {
+                if (idx >= n) return;
+
+                // Place on grid
+                particles[idx].position[0] = x * spacing + (spacing * 0.5);
+                particles[idx].position[1] = y * spacing + (spacing * 0.5);
+                particles[idx].position[2] = z * spacing + (spacing * 0.5);
+
+                // Random initial velocity
+                static std::uniform_real_distribution<double> v_dist(-1.0, 1.0);
+                auto& rng = get_rng();
+                particles[idx].velocity = {v_dist(rng), v_dist(rng), v_dist(rng)};
+                
+                idx++;
+            }
+        }
+    }
+}
 
 void compute_forces(std::span<Particle> particles) {
     // Reset forces
@@ -177,23 +191,75 @@ void save_frame(int step, const std::vector<Particle>& particles) {
     data.close();
 }
 
+double compute_kinetic_energy(const std::vector<Particle>& particles) {
+    double ke = 0.0;
+    for (const auto& p : particles) {
+        double v2 = p.velocity[0]*p.velocity[0] + 
+                    p.velocity[1]*p.velocity[1] + 
+                    p.velocity[2]*p.velocity[2];
+        ke += 0.5 * m * v2;
+    }
+    return ke;
+}
+
+double compute_potential_energy(const std::vector<Particle>& particles) {
+    double pe = 0.0;
+    for (size_t i = 0; i < particles.size(); ++i) {
+        for (size_t j = i + 1; j < particles.size(); ++j) {
+            
+            double dx = particles[i].position[0] - particles[j].position[0];
+            double dy = particles[i].position[1] - particles[j].position[1];
+            double dz = particles[i].position[2] - particles[j].position[2];
+
+            // Apply Periodic Boundaries
+            if (dx > L/2) dx -= L;
+            if (dx < -L/2) dx += L;
+            if (dy > L/2) dy -= L;
+            if (dy < -L/2) dy += L;
+            if (dz > L/2) dz -= L;
+            if (dz < -L/2) dz += L;
+
+            double r2 = dx*dx + dy*dy + dz*dz;
+
+            if (r2 < CUTOFF_SQ) {
+                double inv_r2 = 1.0 / r2;
+                double inv_r6 = inv_r2 * inv_r2 * inv_r2;
+                double inv_r12 = inv_r6 * inv_r6;
+                
+                pe += 4.0 * epsilon * (inv_r12 - inv_r6);
+            }
+        }
+    }
+    return pe;
+}
 
 int main() {
     std::filesystem::create_directory("dumps");
 
-    std::vector<Particle> particles(num_particles);
-    std::cout << "Starting Simulation with " << particles.size() << " particles.\n";
+    std::ofstream energy_file("energy.csv");
+    energy_file << "Time,Kinetic,Potential,Total\n";
 
+    std::vector<Particle> particles(num_particles);
+    init_lattice(particles, 0.8);
+    std::cout << "Starting Simulation with " << particles.size() << " particles.\n";
     compute_forces(particles);
+
     int steps = static_cast<int>(t_max / dt);
-    
     for (int step = 0; step < steps; ++step) {
         verlet_first_step(particles, dt);
         compute_forces(particles);
         verlet_second_step(particles, dt);
         save_frame(step, particles);
+
+        if (step % 10 == 0) {
+            double ke = compute_kinetic_energy(particles);
+            double pe = compute_potential_energy(particles);
+            double total = ke + pe;
+
+            energy_file << step * dt << "," << ke << "," << pe << "," << total << "\n";
+        }
     }
-    
+    energy_file.close();
     std::cout << "\nDone.\n";
     return 0;
 }
