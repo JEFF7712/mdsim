@@ -10,17 +10,14 @@
 
 // Parameters
 const int num_particles = 100; // Number of particles
-const double L = 6.0; // Box length for periodic boundaries 
-const double dt = 0.005; // Time step
+const double L = 8.0; // Box length for periodic boundaries 
+const double dt = 0.001; // Time step
 const double t_max = 10.0; // Maximum simulation time
-const double m = 1.0; // Particle mass
 enum class BoundaryCondition { PERIODIC, REFLECTIVE };
 const BoundaryCondition BC = BoundaryCondition::PERIODIC; // Boundary condition type
 
-// Lenenard Jones potential parameters
-const double epsilon = 1.0;
-const double sigma = 1.0;
-const double CUTOFF = 2.5 * sigma; // Ignore atoms too far away
+// Force cutoff
+const double CUTOFF = 3.5 * 1.2;
 const double CUTOFF_SQ = CUTOFF * CUTOFF;
 
 // Random number generator
@@ -30,13 +27,26 @@ std::mt19937& get_rng() {
     return engine;
 }
 
+// Atom type structure
+struct AtomType {
+    double mass;
+    double sigma;
+    double epsilon;
+};
+
+const std::vector<AtomType> ATOM_TYPES = {
+    {1.0, 1.0, 1.0},   // Type 0: Small, Light
+    {2.0, 1.2, 1.5}    // Type 1: Bigger (1.2x), Heavier (2.0x), Stickier (1.5x)
+};
+
 // Particle structure
 struct Particle {
     std::array<double, 3> position;
     std::array<double, 3> velocity;
     std::array<double, 3> force;
+    int type;
 
-    Particle() : position{0,0,0}, velocity{0,0,0}, force{0,0,0} {}
+    Particle() : position{0,0,0}, velocity{0,0,0}, force{0,0,0}, type(0) {}
 };
 
 void init_lattice(std::vector<Particle>& particles, double density) {
@@ -55,6 +65,9 @@ void init_lattice(std::vector<Particle>& particles, double density) {
                 particles[idx].position[1] = y * spacing + (spacing * 0.5);
                 particles[idx].position[2] = z * spacing + (spacing * 0.5);
 
+                static std::uniform_int_distribution<int> type_dist(0, ATOM_TYPES.size() - 1);
+                particles[idx].type = type_dist(get_rng());
+
                 // Random initial velocity
                 static std::uniform_real_distribution<double> v_dist(-1.0, 1.0);
                 auto& rng = get_rng();
@@ -66,57 +79,181 @@ void init_lattice(std::vector<Particle>& particles, double density) {
     }
 }
 
-void compute_forces(std::span<Particle> particles) {
-    // Reset forces
+struct CellList {
+    double cell_size;
+    int grid_dim;
+    int num_cells;
+
+    std::vector<int> head;
+    std::vector<int> next;
+
+    CellList(double box_length, double cutoff, int num_particles) {
+        // How many cells fit in the box
+        grid_dim = static_cast<int>(std::floor(box_length / cutoff));
+        // At least one cell
+        if (grid_dim == 0) grid_dim = 1; 
+        
+        // Actual size of cell
+        cell_size = box_length / grid_dim;
+
+        // Total number of cells 
+        num_cells = grid_dim * grid_dim * grid_dim;
+
+        // Resize arrays to match number of cells and particles
+        head.resize(num_cells);
+        next.resize(num_particles);
+    }
+
+    // Convert position to cell index
+    int get_cell_index(double x, double y, double z) const {
+
+        // Wrap positions to be within box using mod
+        x = std::fmod(x, L);
+        if (x < 0.0) x += L;
+        
+        y = std::fmod(y, L);
+        if (y < 0.0) y += L;
+        
+        z = std::fmod(z, L);
+        if (z < 0.0) z += L;
+
+        // Find cell coordinates
+        int cx = static_cast<int>(x / cell_size);
+        int cy = static_cast<int>(y / cell_size);
+        int cz = static_cast<int>(z / cell_size);
+        
+        // Ensure cell indices are within bounds
+        cx = std::min(cx, grid_dim - 1);
+        cy = std::min(cy, grid_dim - 1);
+        cz = std::min(cz, grid_dim - 1);
+
+        // Flatten 3D index to 1D
+        return cx + cy * grid_dim + cz * grid_dim * grid_dim;
+    }
+
+    void build(const std::span<Particle> particles) {
+
+        // Fill head with -1 (-1 indicates last particle in cell)
+        std::fill(head.begin(), head.end(), -1);
+
+        // Assign each particle to a cell
+        for (int i = 0; i < particles.size(); ++i) {
+            int cell = get_cell_index(particles[i].position[0], particles[i].position[1], particles[i].position[2]);
+
+            next[i] = head[cell];
+            head[cell] = i;
+        }
+    }
+
+
+};
+
+double compute_forces(std::span<Particle> particles, CellList& cells) {
+    // Reset Forces
     for (auto& p : particles) {
         p.force = {0.0, 0.0, 0.0};
     }
 
-    for (size_t i = 0; i < particles.size(); ++i) {
-        for (size_t j = i + 1; j < particles.size(); ++j) {
+    // Build cell list with current positions
+    cells.build(particles);
 
-            Particle& p1 = particles[i];
-            Particle& p2 = particles[j];
+    // Get grid dimension
+    int dim = cells.grid_dim;
 
-            // Distances
-            double dx = p1.position[0] - p2.position[0];
-            double dy = p1.position[1] - p2.position[1];
-            double dz = p1.position[2] - p2.position[2];
+    double total_potential = 0.0;
+    
+    // Loop over all cells
+    for (int cx = 0; cx < dim; ++cx) {
+        for (int cy = 0; cy < dim; ++cy) {
+            for (int cz = 0; cz < dim; ++cz) {
+                
+                // 1D index of current cell
+                int cell_index = cx + cy * dim + cz * dim * dim;
 
-            // Periodic boundary conditions
-            if (dx > L/2) dx -= L;
-            if (dx < -L/2) dx += L;
-            if (dy > L/2) dy -= L;
-            if (dy < -L/2) dy += L;
-            if (dz > L/2) dz -= L;
-            if (dz < -L/2) dz += L;
+                // Loop over particles in this cell starting at head
+                int i = cells.head[cell_index];
+                while (i != -1) { 
+                    
+                    // Check a every cell around current cell (3x3x3 block)
+                    for (int nx = cx - 1; nx <= cx + 1; ++nx) {
+                        for (int ny = cy - 1; ny <= cy + 1; ++ny) {
+                            for (int nz = cz - 1; nz <= cz + 1; ++nz) {
+                                
+                                // Periodic wrap for cell indices
+                                int wrapped_nx = (nx + dim) % dim;
+                                int wrapped_ny = (ny + dim) % dim;
+                                int wrapped_nz = (nz + dim) % dim;
+                                
+                                // 1D index of neighbor cell
+                                int neighbor_cell_index = wrapped_nx + wrapped_ny * dim + wrapped_nz * dim * dim;
 
-            double r2 = dx*dx + dy*dy + dz*dz;
+                                // Loop over particles in neighbor cell
+                                int j = cells.head[neighbor_cell_index];
+                                while (j != -1) {
+                                    
+                                    // Avoid double counting and self-interaction
+                                    if (i < j) {
+                                        Particle& p1 = particles[i];
+                                        Particle& p2 = particles[j];
 
-            if (r2 < CUTOFF_SQ) {
-                double inv_r2 = 1.0 / r2;
-                double inv_r6 = inv_r2 * inv_r2 * inv_r2;
-                double inv_r12 = inv_r6 * inv_r6;
+                                        const AtomType& type1 = ATOM_TYPES[p1.type];
+                                        const AtomType& type2 = ATOM_TYPES[p2.type];
 
-                // Simplified assuming sigma=1 for now
-                double factor = (24.0 * epsilon * inv_r2) * (2.0 * inv_r12 - inv_r6);
+                                        double sigma = 0.5 * (type1.sigma + type2.sigma);
+                                        double epsilon = std::sqrt(type1.epsilon * type2.epsilon);
 
-                // Distribute force to vectors
-                double fx = factor * dx;
-                double fy = factor * dy;
-                double fz = factor * dz;
+                                        double dx = p1.position[0] - p2.position[0];
+                                        double dy = p1.position[1] - p2.position[1];
+                                        double dz = p1.position[2] - p2.position[2];
 
-                // Apply forces
-                p1.force[0] += fx;
-                p1.force[1] += fy;
-                p1.force[2] += fz;
+                                        // Periodic boundary
+                                        if (dx > L/2) dx -= L; 
+                                        if (dx < -L/2) dx += L;
+                                        if (dy > L/2) dy -= L; 
+                                        if (dy < -L/2) dy += L;
+                                        if (dz > L/2) dz -= L; 
+                                        if (dz < -L/2) dz += L;
 
-                p2.force[0] -= fx;
-                p2.force[1] -= fy;
-                p2.force[2] -= fz;
+                                        double r2 = dx*dx + dy*dy + dz*dz;
+
+                                        if (r2 < CUTOFF_SQ && r2 > 0.0) {
+                                            double inv_r2 = 1.0 / r2;
+                                            double sig_inv_r2 = sigma * sigma * inv_r2;
+                                            double sig_inv_r6 = sig_inv_r2 * sig_inv_r2 * sig_inv_r2;
+                                            double sig_inv_r12 = sig_inv_r6 * sig_inv_r6;
+                                            double factor = (24.0 * epsilon * inv_r2) * (2.0 * sig_inv_r12 - sig_inv_r6);
+
+                                            double fx = factor * dx;
+                                            double fy = factor * dy;
+                                            double fz = factor * dz;
+
+                                            p1.force[0] += fx; p1.force[1] += fy; p1.force[2] += fz;
+                                            p2.force[0] -= fx; p2.force[1] -= fy; p2.force[2] -= fz;
+
+                                            double u_r = 4.0 * epsilon * (sig_inv_r12 - sig_inv_r6);
+
+                                            // Pre-calculate inverse cutoff terms based on sigma
+                                            double inv_rc2 = 1.0 / CUTOFF_SQ;
+                                            double sig_rc2 = sigma * sigma * inv_rc2;
+                                            double sig_rc6 = sig_rc2 * sig_rc2 * sig_rc2;
+                                            double sig_rc12 = sig_rc6 * sig_rc6;
+                                            double u_shift = 4.0 * epsilon * (sig_rc12 - sig_rc6);
+
+                                            // Add shifted potential
+                                            total_potential += (u_r - u_shift);
+                                        }
+                                    }
+                                    j = cells.next[j];
+                                }
+                            }
+                        }
+                    }
+                    i = cells.next[i];
+                }
             }
         }
     }
+    return total_potential;
 }
 
 // Periodic boundary condition
@@ -145,6 +282,7 @@ void apply_reflective_bc(Particle& p) {
 
 void verlet_first_step(std::span<Particle> particles, double dt) {
     for (auto& p : particles) {
+        double m = ATOM_TYPES[p.type].mass;
         std::array<double, 3> acceleration = {p.force[0]/m, p.force[1]/m, p.force[2]/m};
 
         for (int i = 0; i < 3; ++i) {
@@ -163,6 +301,7 @@ void verlet_first_step(std::span<Particle> particles, double dt) {
 
 void verlet_second_step(std::span<Particle> particles, double dt) {
     for (auto& p : particles) {
+        double m = ATOM_TYPES[p.type].mass;
         std::array<double, 3> acceleration = {p.force[0]/m, p.force[1]/m, p.force[2]/m};
 
         for (int i = 0; i < 3; ++i) {
@@ -179,11 +318,11 @@ void save_frame(int step, const std::vector<Particle>& particles) {
     data << "ITEM: NUMBER OF ATOMS\n" << particles.size() << "\n";
     data << "ITEM: BOX BOUNDS pp pp pp\n";
     data << "0.0 " << L << "\n0.0 " << L << "\n0.0 " << L << "\n";
-    data << "ITEM: ATOMS id x y z vx vy vz\n";
+    data << "ITEM: ATOMS id type x y z vx vy vz\n";
 
     for (size_t i = 0; i < particles.size(); ++i) {
         const auto& p = particles[i];
-        data << i << " " 
+        data << i << " " << p.type << " " 
              << p.position[0] << " " << p.position[1] << " " << p.position[2] << " "
              << p.velocity[0] << " " << p.velocity[1] << " " << p.velocity[2] << "\n";
     }
@@ -197,40 +336,10 @@ double compute_kinetic_energy(const std::vector<Particle>& particles) {
         double v2 = p.velocity[0]*p.velocity[0] + 
                     p.velocity[1]*p.velocity[1] + 
                     p.velocity[2]*p.velocity[2];
+        double m = ATOM_TYPES[p.type].mass;
         ke += 0.5 * m * v2;
     }
     return ke;
-}
-
-double compute_potential_energy(const std::vector<Particle>& particles) {
-    double pe = 0.0;
-    for (size_t i = 0; i < particles.size(); ++i) {
-        for (size_t j = i + 1; j < particles.size(); ++j) {
-            
-            double dx = particles[i].position[0] - particles[j].position[0];
-            double dy = particles[i].position[1] - particles[j].position[1];
-            double dz = particles[i].position[2] - particles[j].position[2];
-
-            // Apply Periodic Boundaries
-            if (dx > L/2) dx -= L;
-            if (dx < -L/2) dx += L;
-            if (dy > L/2) dy -= L;
-            if (dy < -L/2) dy += L;
-            if (dz > L/2) dz -= L;
-            if (dz < -L/2) dz += L;
-
-            double r2 = dx*dx + dy*dy + dz*dz;
-
-            if (r2 < CUTOFF_SQ) {
-                double inv_r2 = 1.0 / r2;
-                double inv_r6 = inv_r2 * inv_r2 * inv_r2;
-                double inv_r12 = inv_r6 * inv_r6;
-                
-                pe += 4.0 * epsilon * (inv_r12 - inv_r6);
-            }
-        }
-    }
-    return pe;
 }
 
 int main() {
@@ -241,23 +350,29 @@ int main() {
 
     std::vector<Particle> particles(num_particles);
     init_lattice(particles, 0.8);
+    CellList cells(L, CUTOFF, num_particles);
     std::cout << "Starting Simulation with " << particles.size() << " particles.\n";
-    compute_forces(particles);
+    
+    double pe = compute_forces(particles, cells);
 
     int steps = static_cast<int>(t_max / dt);
     for (int step = 0; step < steps; ++step) {
         verlet_first_step(particles, dt);
-        compute_forces(particles);
+        pe = compute_forces(particles, cells);
         verlet_second_step(particles, dt);
-        save_frame(step, particles);
-
         if (step % 10 == 0) {
+            save_frame(step, particles);
+
             double ke = compute_kinetic_energy(particles);
-            double pe = compute_potential_energy(particles);
             double total = ke + pe;
 
             energy_file << step * dt << "," << ke << "," << pe << "," << total << "\n";
+
+            if (step % 100 == 0) {
+                std::cout << "Step " << step << " / " << steps << "\r" << std::flush;
+            }
         }
+
     }
     energy_file.close();
     std::cout << "\nDone.\n";

@@ -9,7 +9,6 @@ plt.figure(figsize=(10, 6))
 plt.plot(df['Time'], df['Kinetic'], label='Kinetic', marker='o', markersize=3)
 plt.plot(df['Time'], df['Potential'], label='Potential', marker='s', markersize=3)
 plt.plot(df['Time'], df['Total'], label='Total', marker='^', markersize=3)
-
 plt.xlabel('Time')
 plt.ylabel('Energy')
 plt.title('Energy vs Time')
