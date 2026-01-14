@@ -8,13 +8,18 @@
 #include <string>
 #include <span>
 
+enum class BoundaryCondition { PERIODIC, REFLECTIVE };
+enum class Ensemble { NVE, NVT };
+
 // Parameters
 const int num_particles = 100; // Number of particles
 const double L = 8.0; // Box length for periodic boundaries 
 const double dt = 0.001; // Time step
 const double t_max = 10.0; // Maximum simulation time
-enum class BoundaryCondition { PERIODIC, REFLECTIVE };
 const BoundaryCondition BC = BoundaryCondition::PERIODIC; // Boundary condition type
+const Ensemble ensemble = Ensemble::NVT; // Ensemble type
+double kb = 1.0; // Boltzmann constant
+double target_temp = 5.0; // Target temperature for NVT
 
 // Force cutoff
 const double CUTOFF = 3.5 * 1.2;
@@ -36,7 +41,7 @@ struct AtomType {
 
 const std::vector<AtomType> ATOM_TYPES = {
     {1.0, 1.0, 1.0},   // Type 0: Small, Light
-    {2.0, 1.2, 1.5}    // Type 1: Bigger (1.2x), Heavier (2.0x), Stickier (1.5x)
+    {10.0, 1.2, 1.5}    // Type 1: Bigger (1.2x), Heavier (10.0x), Stickier (1.5x)
 };
 
 // Particle structure
@@ -342,11 +347,24 @@ double compute_kinetic_energy(const std::vector<Particle>& particles) {
     return ke;
 }
 
+void rescale_velocities(std::vector<Particle>& particles, double target_temp) {
+    double ke = compute_kinetic_energy(particles);
+    double dof = 3.0 * (particles.size() - 1.0);
+    double current_temp = 2.0 * ke / (dof * kb);
+    double scale_factor = std::sqrt(target_temp / current_temp);
+
+    for (auto& p : particles) {
+        for (int i = 0; i < 3; ++i) {
+            p.velocity[i] *= scale_factor;
+        }
+    }
+}
+
 int main() {
     std::filesystem::create_directory("dumps");
 
     std::ofstream energy_file("energy.csv");
-    energy_file << "Time,Kinetic,Potential,Total\n";
+    energy_file << "Time,Kinetic,Potential,Total,Temperature\n";
 
     std::vector<Particle> particles(num_particles);
     init_lattice(particles, 0.8);
@@ -360,13 +378,23 @@ int main() {
         verlet_first_step(particles, dt);
         pe = compute_forces(particles, cells);
         verlet_second_step(particles, dt);
+
+
         if (step % 10 == 0) {
+
+            if (ensemble == Ensemble::NVT) {
+                rescale_velocities(particles, target_temp);
+            }
+
             save_frame(step, particles);
 
             double ke = compute_kinetic_energy(particles);
             double total = ke + pe;
 
-            energy_file << step * dt << "," << ke << "," << pe << "," << total << "\n";
+            double dof = 3.0 * (particles.size() - 1.0);
+            double current_temp = 2.0 * ke / (dof * kb);
+
+            energy_file << step * dt << "," << ke << "," << pe << "," << total << "," << current_temp << "\n";
 
             if (step % 100 == 0) {
                 std::cout << "Step " << step << " / " << steps << "\r" << std::flush;
