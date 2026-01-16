@@ -166,16 +166,15 @@ __global__ void compute_forces_kernel(
     double* fz,
     double L, 
     double CUTOFF_SQ,
-    int max_neighbors
+    int max_neighbors,
+    double* d_energy
 ) {
+    __shared__ double shared_energy[256];
+    
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= N) return;
+    int tid = threadIdx.x;
 
-    double xi = x[i];
-    double yi = y[i];
-    double zi = z[i];
-    int type_i = type[i];
-
+    double local_energy = 0.0;
     double fxi = 0.0;
     double fyi = 0.0;
     double fzi = 0.0;
@@ -183,67 +182,86 @@ __global__ void compute_forces_kernel(
     double sigmas[2] = {0.4000, 3.1506};
     double epsilons[2] = {0.0460, 0.1521};
     double charges[2] = {0.417, -0.834};
-
     const double MAX_FORCE = 10000.0;
 
-    int neighbor_count = num_neighbors[i];
+    if (i < N) {
+        double xi = x[i];
+        double yi = y[i];
+        double zi = z[i];
+        int type_i = type[i];
+        int neighbor_count = num_neighbors[i];
 
-    for (int k = 0; k < neighbor_count; ++k) {
-        int j = neighbor_list[i * max_neighbors + k];
+        for (int k = 0; k < neighbor_count; ++k) {
+            int j = neighbor_list[i * max_neighbors + k];
 
-        double dx = xi - x[j];
-        double dy = yi - y[j];
-        double dz = zi - z[j];
-        
-        if (dx > L * 0.5) dx -= L; 
-        if (dx < -L * 0.5) dx += L;
-        if (dy > L * 0.5) dy -= L; 
-        if (dy < -L * 0.5) dy += L;
-        if (dz > L * 0.5) dz -= L; 
-        if (dz < -L * 0.5) dz += L;
+            double dx = xi - x[j];
+            double dy = yi - y[j];
+            double dz = zi - z[j];
+            
+            if (dx > L * 0.5) dx -= L; 
+            if (dx < -L * 0.5) dx += L;
+            if (dy > L * 0.5) dy -= L; 
+            if (dy < -L * 0.5) dy += L;
+            if (dz > L * 0.5) dz -= L; 
+            if (dz < -L * 0.5) dz += L;
 
-        double r2 = dx*dx + dy*dy + dz*dz;
+            double r2 = dx*dx + dy*dy + dz*dz;
 
-        if (r2 < CUTOFF_SQ && r2 > 0.0) {
-            int type_j = type[j];
+            if (r2 < CUTOFF_SQ && r2 > 0.0) {
+                int type_j = type[j];
 
-            double sigma = 0.5 * (sigmas[type_i] + sigmas[type_j]);
-            double epsilon = sqrt(epsilons[type_i] * epsilons[type_j]);
+                double sigma = 0.5 * (sigmas[type_i] + sigmas[type_j]);
+                double epsilon = sqrt(epsilons[type_i] * epsilons[type_j]);
 
-            double r = sqrt(r2 + 1e-10);
-            double inv_r2 = 1 / (r2 + 1e-10);
-            double sig_inv_r2 = sigma * sigma * inv_r2;
-            double sig_inv_r6 = sig_inv_r2 * sig_inv_r2 * sig_inv_r2;
-            double sig_inv_r12 = sig_inv_r6 * sig_inv_r6;
-            double f_lj = (24.0 * epsilon * inv_r2) * (2.0 * sig_inv_r12 - sig_inv_r6);
+                double r = sqrt(r2 + 1e-10);
+                double inv_r2 = 1 / (r2 + 1e-10);
+                double sig_inv_r2 = sigma * sigma * inv_r2;
+                double sig_inv_r6 = sig_inv_r2 * sig_inv_r2 * sig_inv_r2;
+                double sig_inv_r12 = sig_inv_r6 * sig_inv_r6;
+                double f_lj = (24.0 * epsilon * inv_r2) * (2.0 * sig_inv_r12 - sig_inv_r6);
 
-            double q1 = charges[type_i];
-            double q2 = charges[type_j];
-            double coulomb_force = (332.06 * q1 * q2) / r2;
-            double f_elec = coulomb_force * (1.0 / r);
+                double q1 = charges[type_i];
+                double q2 = charges[type_j];
+                double coulomb_force = (332.06 * q1 * q2) / r2;
+                double f_elec = coulomb_force * (1.0 / r);
 
-            double f_total = f_lj + f_elec;
+                double f_total = f_lj + f_elec;
 
-            if (f_total > MAX_FORCE) f_total = MAX_FORCE;
-            if (f_total < -MAX_FORCE) f_total = -MAX_FORCE;
+                if (f_total > MAX_FORCE) f_total = MAX_FORCE;
+                if (f_total < -MAX_FORCE) f_total = -MAX_FORCE;
 
-            // Local accumulation
-            fxi += f_total * dx;
-            fyi += f_total * dy;
-            fzi += f_total * dz;
+                fxi += f_total * dx;
+                fyi += f_total * dy;
+                fzi += f_total * dz;
+
+                double pair_energy = 4.0 * epsilon * (sig_inv_r12 - sig_inv_r6) + (332.06 * q1 * q2) / r;
+                local_energy += 0.5 * pair_energy;
+            }
         }
+        fx[i] += fxi;
+        fy[i] += fyi;
+        fz[i] += fzi;
     }
-    // Write back to global memory
-    fx[i] += fxi;
-    fy[i] += fyi;
-    fz[i] += fzi;
+
+    shared_energy[tid] = local_energy;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_energy[tid] += shared_energy[tid + s];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        atomicAdd(d_energy, shared_energy[0]);
+    }
 }
 
 void build_and_compute_gpu(
     int N, const double* h_x, const double* h_y, const double* h_z, const int* h_type,
     double* h_fx, double* h_fy, double* h_fz,
-    SystemGPU& gpu, double L, double CUTOFF_SQ, double GRID_CELL_SIZE, int GRID_DIM,
-    bool rebuild
+    SystemGPU& gpu, double L, double CUTOFF_SQ, double VERLET_CUTOFF_SQ, double GRID_CELL_SIZE, int GRID_DIM,
+    double* h_gpu_pe, bool rebuild
 ) {
     cudaSetDevice(0);
 
@@ -289,12 +307,11 @@ void build_and_compute_gpu(
         find_cell_bounds_kernel<<<blocks, threads, 0, stream>>>(N, d_cell_id_sorted, gpu.d_cell_start, gpu.d_cell_end);
 
         // Build neighbors
-        double SKIN_CUTOFF_SQ = (sqrt(CUTOFF_SQ) + 2.0) * (sqrt(CUTOFF_SQ) + 2.0);
         build_neighbors_kernel<<<blocks, threads, 0, stream>>>(
             N, gpu.d_x, gpu.d_y, gpu.d_z, d_particle_id_sorted, 
             gpu.d_cell_start, gpu.d_cell_end, 
             gpu.d_neighbor_list, gpu.d_num_neighbors, 
-            L, SKIN_CUTOFF_SQ, GRID_CELL_SIZE, GRID_DIM, gpu.max_neighbors
+            L, VERLET_CUTOFF_SQ, GRID_CELL_SIZE, GRID_DIM, gpu.max_neighbors
         );
 
         cudaFreeAsync(d_temp_storage, stream);
@@ -303,17 +320,19 @@ void build_and_compute_gpu(
     cudaMemsetAsync(gpu.d_fx, 0, N * sizeof(double), stream);
     cudaMemsetAsync(gpu.d_fy, 0, N * sizeof(double), stream);
     cudaMemsetAsync(gpu.d_fz, 0, N * sizeof(double), stream);
+    cudaMemsetAsync(gpu.d_energy, 0, sizeof(double), stream);
 
     compute_forces_kernel<<<blocks, threads, 0, stream>>>(
         N, gpu.d_x, gpu.d_y, gpu.d_z, gpu.d_type, 
         gpu.d_neighbor_list, gpu.d_num_neighbors, 
         gpu.d_fx, gpu.d_fy, gpu.d_fz, 
-        L, CUTOFF_SQ, gpu.max_neighbors
+        L, CUTOFF_SQ, gpu.max_neighbors, gpu.d_energy
     );
     
     cudaMemcpyAsync(h_fx, gpu.d_fx, N * sizeof(double), cudaMemcpyDeviceToHost, stream);
     cudaMemcpyAsync(h_fy, gpu.d_fy, N * sizeof(double), cudaMemcpyDeviceToHost, stream);
     cudaMemcpyAsync(h_fz, gpu.d_fz, N * sizeof(double), cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(h_gpu_pe, gpu.d_energy, sizeof(double), cudaMemcpyDeviceToHost, stream);
 
     cudaStreamSynchronize(stream);
     cudaStreamDestroy(stream);
@@ -324,7 +343,6 @@ void SystemGPU::allocate(int num_atoms, int max_n, int grid_dim) {
     max_neighbors = max_n;
     num_cells = grid_dim * grid_dim * grid_dim;
 
-    // Standard arrays
     cudaMalloc(&d_x, N * sizeof(double));
     cudaMalloc(&d_y, N * sizeof(double));
     cudaMalloc(&d_z, N * sizeof(double));
@@ -334,18 +352,14 @@ void SystemGPU::allocate(int num_atoms, int max_n, int grid_dim) {
     cudaMalloc(&d_type, N * sizeof(int));
     cudaMalloc(&d_neighbor_list, N * max_neighbors * sizeof(int));
     cudaMalloc(&d_num_neighbors, N * sizeof(int));
-
-    // Sort arrays (main)
     cudaMalloc(&d_cell_id, N * sizeof(int));
     cudaMalloc(&d_particle_id, N * sizeof(int));
-    
-    // Sort arrays (alternate)
     cudaMalloc(&d_cell_id_alt, N * sizeof(int));
     cudaMalloc(&d_particle_id_alt, N * sizeof(int));
-
-    // Grid arrays
     cudaMalloc(&d_cell_start, num_cells * sizeof(int));
     cudaMalloc(&d_cell_end, num_cells * sizeof(int));
+    cudaMalloc(&d_energy, sizeof(double));
+
 }
 
 void SystemGPU::cleanup() {
@@ -355,4 +369,5 @@ void SystemGPU::cleanup() {
     cudaFree(d_cell_id); cudaFree(d_particle_id);
     cudaFree(d_cell_id_alt); cudaFree(d_particle_id_alt);
     cudaFree(d_cell_start); cudaFree(d_cell_end);
+    cudaFree(d_energy);
 }

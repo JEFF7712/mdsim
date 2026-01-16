@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Read the CSV file
-df = pd.read_csv('energy.csv')
+df = pd.read_csv('outputs/energy.csv')
 
 # Create figure and plot
 plt.figure(figsize=(10, 6))

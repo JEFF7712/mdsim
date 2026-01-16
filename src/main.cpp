@@ -7,34 +7,12 @@
 #include <string>
 #include <omp.h>
 #include "gpu_interface.h"
+#include "config.h"
 
-// Distance: Angstroms (Å)
-// Time: femtoseconds (fs)
-// Mass: atomic mass units (amu)
-// Energy: kcal/mol
-// Temperature: Kelvin (K)
-// Force: kcal/mol/Å
-
-// Parameters
-const int num_molecules = 1000; // Number of molecules
-const double L = 31.0; // Box length (Angstroms)
-const double dt = 0.5; // Time step (fs)
-const double t_max = 5000.0; // Maximum simulation time (fs)
-enum class Ensemble { NVE, NVT };
-const Ensemble ensemble = Ensemble::NVT; // Ensemble type
+// Constants
 const double kb = 0.001987204; // Boltzmann constant (kcal/mol/K)
-const double target_temp = 300.0; // Target temperature (K)
-
-// Conversion Factor:
 const double F_TO_ACC = 4.184e-4; // [kcal/mol/Angstrom] -> [amu * (A/fs^2)]
 const double KE_TO_KCAL = 2390.057; // [amu * (A/fs)^2] -> [kcal/mol]
-
-// Force cutoff
-const double CUTOFF = 10.0; // Cutoff distance (Angstroms)
-const double CUTOFF_SQ = CUTOFF * CUTOFF;
-const double SKIN = 2.0;
-const double VERLET_CUTOFF = CUTOFF + SKIN;
-const double VERLET_CUTOFF_SQ = VERLET_CUTOFF * VERLET_CUTOFF;
 
 // Random number generator
 std::mt19937& get_rng() {
@@ -93,7 +71,7 @@ struct System {
     }
 };
 
-void init_water_box(System& sys, std::vector<Bond>& bonds, std::vector<Angle>& angles) {
+void init_water_box(System& sys, std::vector<Bond>& bonds, std::vector<Angle>& angles, int num_molecules, double L) {
     int per_side = std::ceil(std::cbrt(num_molecules));
     double spacing = L / per_side;
     sys.resize(num_molecules * 3);
@@ -110,7 +88,6 @@ void init_water_box(System& sys, std::vector<Bond>& bonds, std::vector<Angle>& a
                 double cz = z * spacing + spacing/2;
 
                 // O
-
                 sys.id[p_idx] = p_idx;
                 sys.type[p_idx] = 1;
                 sys.x[p_idx] = cx;
@@ -153,7 +130,7 @@ void init_water_box(System& sys, std::vector<Bond>& bonds, std::vector<Angle>& a
     }
 }
 
-void compute_bond_forces(System& sys, const std::vector<Bond>& bonds, double& pe_total) {
+void compute_bond_forces(System& sys, const std::vector<Bond>& bonds, double& pe_total, double L) {
     double local_pe = 0.0;
     
     #pragma omp parallel for reduction(+:local_pe)
@@ -197,7 +174,7 @@ void compute_bond_forces(System& sys, const std::vector<Bond>& bonds, double& pe
     pe_total += local_pe;
 }
 
-void compute_angle_forces(System& sys, const std::vector<Angle>& angles, double& pe_total) {
+void compute_angle_forces(System& sys, const std::vector<Angle>& angles, double& pe_total, double L) {
     double local_pe = 0.0;
     
     #pragma omp parallel for reduction(+:local_pe)
@@ -290,41 +267,50 @@ void compute_angle_forces(System& sys, const std::vector<Angle>& angles, double&
     pe_total += local_pe;
 } 
 
-void verlet_first_step(System& sys, double dt) {
+void integrate_langevin_1(System& sys, double dt, double temp, double friction, double L) {
     const double MAX_DISP = 0.1;
+    double gamma = friction / 1000.0;
+    double c1 = (1.0 - gamma * dt * 0.5) / (1.0 + gamma * dt * 0.5);
+    double c2 = 1.0 / (1.0 + gamma * dt * 0.5);
+
+    std::normal_distribution<double> noise(0.0, 1.0);
+    auto& rng = get_rng();
+
     #pragma omp parallel for
     for (size_t i = 0; i < sys.x.size(); ++i) {
         double m = ATOM_TYPES[sys.type[i]].mass;
         double acc_factor = F_TO_ACC / m; 
+        
+        double ax = sys.fx[i] * acc_factor;
+        double ay = sys.fy[i] * acc_factor;
+        double az = sys.fz[i] * acc_factor;
 
-        // Update Velocities
-        sys.vx[i] += 0.5 * sys.fx[i] * acc_factor * dt;
-        sys.vy[i] += 0.5 * sys.fy[i] * acc_factor * dt;
-        sys.vz[i] += 0.5 * sys.fz[i] * acc_factor * dt;
+        double variance = (2.0 * kb * temp * gamma * dt) / (m * KE_TO_KCAL);
+        double sigma_v = std::sqrt(variance);
 
-        // Limit Maximum Displacement
+        // Update velocity
+        sys.vx[i] = c1 * sys.vx[i] + c2 * dt * ax + c2 * sigma_v * noise(rng);
+        sys.vy[i] = c1 * sys.vy[i] + c2 * dt * ay + c2 * sigma_v * noise(rng);
+        sys.vz[i] = c1 * sys.vz[i] + c2 * dt * az + c2 * sigma_v * noise(rng);
+
+        // Update position 
         double dx = sys.vx[i] * dt;
         double dy = sys.vy[i] * dt;
         double dz = sys.vz[i] * dt;
+
+        // Clamp 
         double dist_sq = dx*dx + dy*dy + dz*dz;
         if (dist_sq > MAX_DISP * MAX_DISP) {
-            double dist = std::sqrt(dist_sq);
-            double scale = MAX_DISP / dist;
-            dx *= scale;
-            dy *= scale;
-            dz *= scale;
-            
-            sys.vx[i] *= scale;
-            sys.vy[i] *= scale;
-            sys.vz[i] *= scale;
+            double scale = MAX_DISP / std::sqrt(dist_sq);
+            dx *= scale; dy *= scale; dz *= scale;
+            sys.vx[i] *= scale; sys.vy[i] *= scale; sys.vz[i] *= scale;
         }
 
-        // Update Positions
         sys.x[i] += dx;
         sys.y[i] += dy;
         sys.z[i] += dz;
 
-        // Periodic Boundaries
+        // Periodic boundaries
         if (sys.x[i] < 0) sys.x[i] += L; 
         if (sys.x[i] >= L) sys.x[i] -= L;
         if (sys.y[i] < 0) sys.y[i] += L; 
@@ -334,19 +320,26 @@ void verlet_first_step(System& sys, double dt) {
     }
 }
 
-void verlet_second_step(System& sys, double dt) {
+void integrate_langevin_2(System& sys, double dt, double friction) {
+    double gamma = friction / 1000.0; 
+    double c2 = 1.0 / (1.0 + gamma * dt * 0.5);
+
     #pragma omp parallel for
     for (size_t i = 0; i < sys.x.size(); ++i) {
         double m = ATOM_TYPES[sys.type[i]].mass;
         double acc_factor = F_TO_ACC / m;
+        
+        double ax = sys.fx[i] * acc_factor;
+        double ay = sys.fy[i] * acc_factor;
+        double az = sys.fz[i] * acc_factor;
 
-        sys.vx[i] += 0.5 * acc_factor * sys.fx[i] * dt;
-        sys.vy[i] += 0.5 * acc_factor * sys.fy[i] * dt;
-        sys.vz[i] += 0.5 * acc_factor * sys.fz[i] * dt;
+        sys.vx[i] += c2 * dt * ax;
+        sys.vy[i] += c2 * dt * ay;
+        sys.vz[i] += c2 * dt * az;
     }
 }
 
-void save_frame(int step, const System& sys) {
+void save_frame(int step, const System& sys, double L) {
     std::string filename = "dumps/t" + std::to_string(step) + ".dump";
     std::ofstream data(filename);
     
@@ -394,19 +387,6 @@ void randomize_velocities(System& sys, double temp) {
     double scale = std::sqrt(temp / current_temp);
     for (size_t i=0; i<sys.x.size(); ++i) {
         sys.vx[i] *= scale; sys.vy[i] *= scale; sys.vz[i] *= scale;
-    }
-}
-
-void rescale_velocities(System& sys, double target_temp) {
-    double ke = compute_kinetic_energy(sys);
-    double dof = 3.0 * (sys.x.size() - 1.0);
-    double current_temp = 2.0 * ke / (dof * kb);
-    double scale_factor = std::sqrt(target_temp / current_temp);
-
-    for (size_t i = 0; i < sys.x.size(); ++i) {
-        sys.vx[i] *= scale_factor;
-        sys.vy[i] *= scale_factor;
-        sys.vz[i] *= scale_factor;
     }
 }
 
@@ -491,15 +471,29 @@ struct RDF {
 };
 
 int main() {
+    Config config;
+    config.load("config.txt");
+    int num_molecules = config.get_int("num_molecules", 1000);
+    double L = config.get_double("box_size", 31.0);
+    double dt = config.get_double("timestep", 0.5);
+    double t_max = config.get_double("total_time", 5000.0);
+    double target_temp = config.get_double("temperature", 300.0);
+    double CUTOFF = config.get_double("cutoff", 10.0);
+    double SKIN = config.get_double("skin", 2.0);
+    const double CUTOFF_SQ = CUTOFF * CUTOFF;
+    const double VERLET_CUTOFF = CUTOFF + SKIN;
+    const double VERLET_CUTOFF_SQ = VERLET_CUTOFF * VERLET_CUTOFF;
+    double friction = config.get_double("friction", 1.0);
 
     std::filesystem::create_directory("dumps");
-    std::ofstream energy_file("energy.csv");
+    std::filesystem::create_directory("outputs");
+    std::ofstream energy_file("outputs/energy.csv");
     energy_file << "Time,Kinetic,Potential,Total,Temperature\n";
 
     System sys;
     std::vector<Bond> bonds;
     std::vector<Angle> angles;
-    init_water_box(sys, bonds, angles);
+    init_water_box(sys, bonds, angles, num_molecules, L);
 
     int grid_dim = std::floor(L / VERLET_CUTOFF); 
     if (grid_dim < 3) grid_dim = 3; 
@@ -508,15 +502,16 @@ int main() {
     SystemGPU gpu;
     gpu.allocate(sys.x.size(), 1000, grid_dim);
 
-    std::cout << "Starting Simulation with " << sys.x.size() << " particles.\n";
-    
+    double bonded_pe = 0.0;
+    double gpu_pe = 0.0;
     double pe = 0.0;
 
     // Warmup phase
+    std::cout << "Warmup Started.\n";
     double dt_warmup = 0.01;
     double max_force = 100.0;
     for (int i = 0; i < 2000; ++i) {
-        verlet_first_step(sys, dt_warmup);
+        integrate_langevin_1(sys, dt_warmup, target_temp, friction, L);
         std::fill(sys.vx.begin(), sys.vx.end(), 0.0);
         std::fill(sys.vy.begin(), sys.vy.end(), 0.0);
         std::fill(sys.vz.begin(), sys.vz.end(), 0.0);
@@ -524,11 +519,11 @@ int main() {
             sys.x.size(),
             sys.x.data(), sys.y.data(), sys.z.data(), sys.type.data(),
             sys.fx.data(), sys.fy.data(), sys.fz.data(),
-            gpu, L, CUTOFF_SQ, cell_size, grid_dim, true
+            gpu, L, CUTOFF_SQ, VERLET_CUTOFF_SQ, cell_size, grid_dim, &gpu_pe, true
         );
-        double pe_dummy = 0;
-        compute_bond_forces(sys, bonds, pe_dummy);
-        compute_angle_forces(sys, angles, pe_dummy);
+        double bonded_pe_dummy = 0;
+        compute_bond_forces(sys, bonds, bonded_pe_dummy, L);
+        compute_angle_forces(sys, angles, bonded_pe_dummy, L);
     }
     std::cout << "Warmup Done.\n";
 
@@ -536,30 +531,27 @@ int main() {
 
     RDF rdf(10.0, 0.1);
 
+    std::cout << "Starting Simulation. \n";
     auto start_time = std::chrono::high_resolution_clock::now();
     int steps = static_cast<int>(t_max / dt);
 
     for (int step = 0; step < steps; ++step) {
-        verlet_first_step(sys, dt);
+        integrate_langevin_1(sys, dt, target_temp, friction, L);
         bool rebuild = (step % 5 == 0);
         build_and_compute_gpu(
             sys.x.size(),
             sys.x.data(), sys.y.data(), sys.z.data(), sys.type.data(),
             sys.fx.data(), sys.fy.data(), sys.fz.data(),
-            gpu, L, CUTOFF_SQ, cell_size, grid_dim, rebuild
+            gpu, L, CUTOFF_SQ, VERLET_CUTOFF_SQ, cell_size, grid_dim, &gpu_pe, rebuild
         );
-        pe = 0.0;
-        compute_bond_forces(sys, bonds, pe);
-        compute_angle_forces(sys, angles, pe);
-        verlet_second_step(sys, dt);
+        bonded_pe = 0.0;
+        compute_bond_forces(sys, bonds, bonded_pe, L);
+        compute_angle_forces(sys, angles, bonded_pe, L);
+        integrate_langevin_2(sys, dt, friction);
+        pe = gpu_pe + bonded_pe;
 
         if (step % 10 == 0) {
-
-            if (ensemble == Ensemble::NVT) {
-                rescale_velocities(sys, target_temp);
-            }
-
-            save_frame(step, sys);
+            save_frame(step, sys, L);
 
             double ke = compute_kinetic_energy(sys);
             double total = ke + pe;
@@ -580,7 +572,7 @@ int main() {
     }
     energy_file.close();
     int num_type1 = num_molecules;
-    rdf.write_file("rdf.csv", L, num_type1);
+    rdf.write_file("outputs/rdf.csv", L, num_type1);
 
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> duration = end_time - start_time;

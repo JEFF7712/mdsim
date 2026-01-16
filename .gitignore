@@ -2,5 +2,6 @@
 .cache
 build
 dumps
-*.csv
-*.png
+scripts/__pycache__
+outputs/
+

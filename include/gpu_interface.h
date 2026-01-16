@@ -24,6 +24,8 @@ struct SystemGPU {
     int max_neighbors;
     int num_cells;
 
+    double *d_energy;
+
     void allocate(int num_atoms, int max_n, int grid_dim);
     void cleanup();
 };
@@ -40,8 +42,10 @@ void build_and_compute_gpu(
     SystemGPU& gpu,
     double L, 
     double CUTOFF_SQ,
+    double VERLET_CUTOFF_SQ,
     double GRID_CELL_SIZE, 
     int GRID_DIM,
+    double* h_gpu_pe,
     bool rebuild
 );
 
