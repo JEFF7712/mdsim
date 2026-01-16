@@ -2,14 +2,10 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include <array>
 #include <random>
 #include <chrono>
 #include <string>
-#include <span>
-
-enum class BoundaryCondition { PERIODIC, REFLECTIVE };
-enum class Ensemble { NVE, NVT };
+#include <omp.h>
 
 // Distance: Angstroms (Å)
 // Time: femtoseconds (fs)
@@ -19,26 +15,30 @@ enum class Ensemble { NVE, NVT };
 // Force: kcal/mol/Å
 
 // Parameters
-const int num_molecules = 125; // Number of molecules
-const double L = 15.53; // Box length (Angstroms)
-const double dt = 0.5; // Time step (femtoseconds)
-const double t_max = 5000.0; // Maximum simulation time (femtoseconds = 10 ps)
-const BoundaryCondition BC = BoundaryCondition::PERIODIC; // Boundary condition type
+const int num_molecules = 1000; // Number of molecules
+const double L = 31.0; // Box length (Angstroms)
+const double dt = 0.5; // Time step (fs)
+const double t_max = 2500.0; // Maximum simulation time (fs)
+enum class Ensemble { NVE, NVT };
 const Ensemble ensemble = Ensemble::NVT; // Ensemble type
 const double kb = 0.001987204; // Boltzmann constant (kcal/mol/K)
-const double target_temp = 300.0; // Target temperature (Kelvin)
+const double target_temp = 300.0; // Target temperature (K)
 
-// Conversion Factor: (kcal/mol/A) / amu -> A/fs^2
-const double F_TO_ACC = 4.184e-4;
-const double KE_TO_KCAL = 2390.057;
+// Conversion Factor:
+const double F_TO_ACC = 4.184e-4; // [kcal/mol/Angstrom] -> [amu * (A/fs^2)]
+const double KE_TO_KCAL = 2390.057; // [amu * (A/fs)^2] -> [kcal/mol]
 
 // Force cutoff
-const double CUTOFF = 7.0; // Cutoff distance (Angstroms)
+const double CUTOFF = 10.0; // Cutoff distance (Angstroms)
 const double CUTOFF_SQ = CUTOFF * CUTOFF;
+const double SKIN = 2.0;
+const double VERLET_CUTOFF = CUTOFF + SKIN;
+const double VERLET_CUTOFF_SQ = VERLET_CUTOFF * VERLET_CUTOFF;
 
 // Random number generator
 std::mt19937& get_rng() {
-    static unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+    // static unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+    static unsigned seed = 42;
     static std::mt19937 engine(seed);
     return engine;
 }
@@ -46,18 +46,18 @@ std::mt19937& get_rng() {
 // Atom type structure
 struct AtomType {
     std::string name;
-    double mass;
-    double sigma;
-    double epsilon;
-    double charge;
+    double mass; // amu
+    double sigma; // Angstroms
+    double epsilon; // kcal/mol
+    double charge; 
 };
 
 // Bond structure
 struct Bond {
     int atom1;
     int atom2;
-    double k; // bond strength
-    double rb; // bond length
+    double k; // bond strength (kcal/mol/Angstrom^2)
+    double rb; // bond length (Angstroms)
 };
 
 struct Angle {
@@ -73,84 +73,80 @@ const std::vector<AtomType> ATOM_TYPES = {
     {"O", 15.999, 3.1506, 0.1521, -0.834}   // Type 1: Oxygen
 };
 
-// Particle structure
-struct Particle {
-    std::array<double, 3> position;
-    std::array<double, 3> velocity;
-    std::array<double, 3> force;
-    int type;
-    int id;
-    std::vector<int> exclusions;
 
-    Particle() : position{0,0,0}, velocity{0,0,0}, force{0,0,0}, type(0), id(-1) {}
-};
+struct System {
+    std::vector<double> x, y, z;
+    std::vector<double> vx, vy, vz;
+    std::vector<double> fx, fy, fz;
+    std::vector<int> type;
+    std::vector<int> id;
+    std::vector<std::vector<int>> exclusions;
+    std::vector<std::vector<int>> neighbors;
 
-std::vector<Particle> init_particles(int num_particles) {
-    std::vector<Particle> particles(num_particles);
-    auto& rng = get_rng();
-    std::uniform_int_distribution<int> type_dist(0, ATOM_TYPES.size() - 1);
-    
-    for (int i = 0; i < num_particles; ++i) {
-        particles[i].id = i;
-        particles[i].type = type_dist(rng);
+    void resize(int n) {
+        x.resize(n); y.resize(n); z.resize(n);
+        vx.resize(n); vy.resize(n); vz.resize(n);
+        fx.resize(n); fy.resize(n); fz.resize(n);
+        type.resize(n);
+        id.resize(n);
+        exclusions.resize(n);
+        neighbors.resize(n);
     }
-    return particles;
 };
 
-void init_water_box(std::vector<Particle>& particles, std::vector<Bond>& bonds, std::vector<Angle>& angles) {
+void init_water_box(System& sys, std::vector<Bond>& bonds, std::vector<Angle>& angles) {
     int per_side = std::ceil(std::cbrt(num_molecules));
     double spacing = L / per_side;
-    
+    sys.resize(num_molecules * 3);
     int p_idx = 0;
     
     for (int x = 0; x < per_side; ++x) {
         for (int y = 0; y < per_side; ++y) {
             for (int z = 0; z < per_side; ++z) {
                 // Check if there is enough particles for another water molecule
-                if (p_idx + 2 >= particles.size()) return;
+                if (p_idx + 2 >= sys.x.size()) return;
 
                 double cx = x * spacing + spacing/2;
                 double cy = y * spacing + spacing/2;
                 double cz = z * spacing + spacing/2;
 
                 // O
-                Particle oxy;
-                oxy.id = p_idx;
-                oxy.type = 1;
-                oxy.position = {cx, cy, cz};
+
+                sys.id[p_idx] = p_idx;
+                sys.type[p_idx] = 1;
+                sys.x[p_idx] = cx;
+                sys.y[p_idx] = cy;
+                sys.z[p_idx] = cz;
                 
                 // H1
-                Particle h1;
-                h1.id = p_idx + 1;
-                h1.type = 0;
-                h1.position = {cx + 0.6, cy + 0.6, cz};
+                sys.id[p_idx + 1] = p_idx + 1;
+                sys.type[p_idx + 1] = 0;
+                sys.x[p_idx + 1] = cx + 0.6;
+                sys.y[p_idx + 1] = cy + 0.6;
+                sys.z[p_idx + 1] = cz;
 
                 // H2
-                Particle h2;
-                h2.id = p_idx + 2;
-                h2.type = 0;
-                h2.position = {cx - 0.6, cy + 0.6, cz};
-
-                // Add to list
-                particles[oxy.id] = oxy;
-                particles[h1.id] = h1;
-                particles[h2.id] = h2;
+                sys.id[p_idx + 2] = p_idx + 2;
+                sys.type[p_idx + 2] = 0;
+                sys.x[p_idx + 2] = cx - 0.6;
+                sys.y[p_idx + 2] = cy + 0.6;
+                sys.z[p_idx + 2] = cz;
 
                 // Create Bonds
-                bonds.push_back({oxy.id, h1.id, 450.0, 0.9572});
-                bonds.push_back({oxy.id, h2.id, 450.0, 0.9572});
+                bonds.push_back({sys.id[p_idx], sys.id[p_idx + 1], 450.0, 0.9572});
+                bonds.push_back({sys.id[p_idx], sys.id[p_idx + 2], 450.0, 0.9572});
 
                 // Create Angle
                 double theta_eq = 104.52 * 3.14159 / 180.0;
-                angles.push_back({h1.id, oxy.id, h2.id, 100.0, theta_eq});
+                angles.push_back({sys.id[p_idx + 1], sys.id[p_idx], sys.id[p_idx + 2], 100.0, theta_eq});
 
                 // Add Exclusions
-                particles[oxy.id].exclusions.push_back(h1.id);
-                particles[oxy.id].exclusions.push_back(h2.id);
-                particles[h1.id].exclusions.push_back(oxy.id);
-                particles[h2.id].exclusions.push_back(oxy.id);
-                particles[h1.id].exclusions.push_back(h2.id);
-                particles[h2.id].exclusions.push_back(h1.id);
+                sys.exclusions[sys.id[p_idx]].push_back(sys.id[p_idx + 1]);
+                sys.exclusions[sys.id[p_idx]].push_back(sys.id[p_idx + 2]);
+                sys.exclusions[sys.id[p_idx + 1]].push_back(sys.id[p_idx]);
+                sys.exclusions[sys.id[p_idx + 2]].push_back(sys.id[p_idx]);
+                sys.exclusions[sys.id[p_idx + 1]].push_back(sys.id[p_idx + 2]);
+                sys.exclusions[sys.id[p_idx + 2]].push_back(sys.id[p_idx + 1]);
 
                 p_idx += 3;
             }
@@ -210,14 +206,14 @@ struct CellList {
         return cx + cy * grid_dim + cz * grid_dim * grid_dim;
     }
 
-    void build(const std::span<Particle> particles) {
+    void build(const System& sys) {
 
         // Fill head with -1 (-1 indicates last particle in cell)
         std::fill(head.begin(), head.end(), -1);
 
         // Assign each particle to a cell
-        for (int i = 0; i < particles.size(); ++i) {
-            int cell = get_cell_index(particles[i].position[0], particles[i].position[1], particles[i].position[2]);
+        for (int i = 0; i < sys.x.size(); ++i) {
+            int cell = get_cell_index(sys.x[i], sys.y[i], sys.z[i]);
 
             next[i] = head[cell];
             head[cell] = i;
@@ -227,15 +223,80 @@ struct CellList {
 
 };
 
-void compute_bond_forces(std::span<Particle> particles, const std::vector<Bond>& bonds, double& pe_total) {
+void build_verlet_lists(System& sys, CellList& cells) {
+    cells.build(sys);
+    int dim = cells.grid_dim;
+
+    #pragma omp parallel for schedule(dynamic) collapse(3)
+    for (int cx = 0; cx < dim; ++cx) {
+        for (int cy = 0; cy < dim; ++cy) {
+            for (int cz = 0; cz < dim; ++cz) {
+                int cell_index = cx + cy * dim + cz * dim * dim;
+                int i = cells.head[cell_index];
+
+                while (i != -1) {
+                    // Clear old list
+                    sys.neighbors[i].clear();
+                    
+                    // Guess ~100 neighbors
+                    sys.neighbors[i].reserve(100); 
+
+                    // Search 3x3x3 block
+                    for (int nx = cx - 1; nx <= cx + 1; ++nx) {
+                        for (int ny = cy - 1; ny <= cy + 1; ++ny) {
+                            for (int nz = cz - 1; nz <= cz + 1; ++nz) {
+                                int wrapped_nx = (nx + dim) % dim;
+                                int wrapped_ny = (ny + dim) % dim;
+                                int wrapped_nz = (nz + dim) % dim;
+                                int neighbor_cell = wrapped_nx + wrapped_ny * dim + wrapped_nz * dim * dim;
+
+                                int j = cells.head[neighbor_cell];
+                                while (j != -1) {
+                                    if (i != j) {
+                                        
+                                        // Squared Distance Check
+                                        double dx = sys.x[i] - sys.x[j];
+                                        double dy = sys.y[i] - sys.y[j];
+                                        double dz = sys.z[i] - sys.z[j];
+                                        
+                                        if (dx > L/2) dx -= L; if (dx < -L/2) dx += L;
+                                        if (dy > L/2) dy -= L; if (dy < -L/2) dy += L;
+                                        if (dz > L/2) dz -= L; if (dz < -L/2) dz += L;
+
+                                        double r2 = dx*dx + dy*dy + dz*dz;
+
+                                        if (r2 < VERLET_CUTOFF_SQ) {
+                                            bool excluded = false;
+                                            for (int ex : sys.exclusions[i]) {
+                                                if (ex == j) { excluded = true; break; }
+                                            }
+                                            if (!excluded) {
+                                                sys.neighbors[i].push_back(j);
+                                            }
+                                        }
+                                    }
+                                    j = cells.next[j];
+                                }
+                            }
+                        }
+                    }
+                    i = cells.next[i];
+                }
+            }
+        }
+    }
+}
+
+
+void compute_bond_forces(System& sys, const std::vector<Bond>& bonds, double& pe_total) {
+    double local_pe = 0.0;
+    
+    #pragma omp parallel for reduction(+:local_pe)
     for (const auto& b : bonds) {
 
-        Particle& p1 = particles[b.atom1];
-        Particle& p2 = particles[b.atom2];
-
-        double dx = p1.position[0] - p2.position[0];
-        double dy = p1.position[1] - p2.position[1];
-        double dz = p1.position[2] - p2.position[2];
+        double dx = sys.x[b.atom1] - sys.x[b.atom2];
+        double dy = sys.y[b.atom1] - sys.y[b.atom2];
+        double dz = sys.z[b.atom1] - sys.z[b.atom2];
 
         if (dx > L/2) dx -= L; 
         if (dx < -L/2) dx += L;
@@ -249,30 +310,41 @@ void compute_bond_forces(std::span<Particle> particles, const std::vector<Bond>&
 
         double delta = r - b.rb;
         double f_mag = -b.k * delta;
-        pe_total += 0.5 * b.k * delta * delta;
+        local_pe += 0.5 * b.k * delta * delta;
 
         double fx = f_mag * (dx / r);
         double fy = f_mag * (dy / r);
         double fz = f_mag * (dz / r);
 
-        p1.force[0] += fx; p1.force[1] += fy; p1.force[2] += fz;
-        p2.force[0] -= fx; p2.force[1] -= fy; p2.force[2] -= fz;
+        #pragma omp atomic
+        sys.fx[b.atom1] += fx;
+        #pragma omp atomic 
+        sys.fy[b.atom1] += fy; 
+        #pragma omp atomic
+        sys.fz[b.atom1] += fz;
+        #pragma omp atomic
+        sys.fx[b.atom2] -= fx; 
+        #pragma omp atomic
+        sys.fy[b.atom2] -= fy;
+        #pragma omp atomic 
+        sys.fz[b.atom2] -= fz;
     }
+    pe_total += local_pe;
 }
 
-void compute_angle_forces(std::span<Particle> particles, const std::vector<Angle>& angles, double& pe_total) {
+void compute_angle_forces(System& sys, const std::vector<Angle>& angles, double& pe_total) {
+    double local_pe = 0.0;
+    
+    #pragma omp parallel for reduction(+:local_pe)
     for (const auto& ang : angles) {
-        Particle& p1 = particles[ang.atom1]; // H1
-        Particle& p2 = particles[ang.atom2]; // O 
-        Particle& p3 = particles[ang.atom3]; // H2
 
-        double r21x = p1.position[0] - p2.position[0];
-        double r21y = p1.position[1] - p2.position[1];
-        double r21z = p1.position[2] - p2.position[2];
+        double r21x = sys.x[ang.atom1] - sys.x[ang.atom2];
+        double r21y = sys.y[ang.atom1] - sys.y[ang.atom2];
+        double r21z = sys.z[ang.atom1] - sys.z[ang.atom2];
 
-        double r23x = p3.position[0] - p2.position[0];
-        double r23y = p3.position[1] - p2.position[1];
-        double r23z = p3.position[2] - p2.position[2];
+        double r23x = sys.x[ang.atom3] - sys.x[ang.atom2];
+        double r23y = sys.y[ang.atom3] - sys.y[ang.atom2];
+        double r23z = sys.z[ang.atom3] - sys.z[ang.atom2];
 
         // Periodic Boundaries
         if (r21x > L/2) r21x -= L; 
@@ -307,7 +379,7 @@ void compute_angle_forces(std::span<Particle> particles, const std::vector<Angle
         double d_theta = theta - ang.theta0;
         
         // Potential Energy
-        pe_total += 0.5 * ang.k * d_theta * d_theta;
+        local_pe += 0.5 * ang.k * d_theta * d_theta;
 
         // Force Magnitude
         double force_factor = -ang.k * d_theta;
@@ -329,326 +401,267 @@ void compute_angle_forces(std::span<Particle> particles, const std::vector<Angle
         double f3z = c2 * (r23z * cos_theta - r21z * (r23/r21));
 
         // Apply forces
-        p1.force[0] += f1x; p1.force[1] += f1y; p1.force[2] += f1z;
-        p3.force[0] += f3x; p3.force[1] += f3y; p3.force[2] += f3z;
+        #pragma omp atomic
+        sys.fx[ang.atom1] += f1x; 
+        #pragma omp atomic
+        sys.fy[ang.atom1] += f1y; 
+        #pragma omp atomic
+        sys.fz[ang.atom1] += f1z;
+        #pragma omp atomic
+        sys.fx[ang.atom3] += f3x; 
+        #pragma omp atomic
+        sys.fy[ang.atom3] += f3y; 
+        #pragma omp atomic
+        sys.fz[ang.atom3] += f3z;
         
         // Center Atom
-        p2.force[0] -= (f1x + f3x);
-        p2.force[1] -= (f1y + f3y);
-        p2.force[2] -= (f1z + f3z);
+        #pragma omp atomic
+        sys.fx[ang.atom2] -= (f1x + f3x);
+        #pragma omp atomic
+        sys.fy[ang.atom2] -= (f1y + f3y);
+        #pragma omp atomic
+        sys.fz[ang.atom2] -= (f1z + f3z);
     }
-}
+    pe_total += local_pe;
+} 
 
-void compute_forces(std::span<Particle> particles, CellList& cells, double& pe_total) {
-    // Build cell list with current positions
-    cells.build(particles);
-    
-    // Get grid dimension
-    int dim = cells.grid_dim;
-
-    double total_potential = 0.0;
+void compute_forces(System& sys, double& pe_total) {
+    double global_pe = 0.0;
     
     // Loop over all cells
-    for (int cx = 0; cx < dim; ++cx) {
-        for (int cy = 0; cy < dim; ++cy) {
-            for (int cz = 0; cz < dim; ++cz) {
+    #pragma omp parallel for schedule(dynamic) reduction(+:global_pe)
+    for (int i = 0; i < sys.x.size(); ++i) {
+        double f1x = 0.0;
+        double f1y = 0.0;
+        double f1z = 0.0;
+        double local_pe = 0.0;
+        const AtomType& type1 = ATOM_TYPES[sys.type[i]];
+        for (int j : sys.neighbors[i]) {
+            double dx = sys.x[i] - sys.x[j];
+            double dy = sys.y[i] - sys.y[j];
+            double dz = sys.z[i] - sys.z[j];
+
+            // Periodic boundary
+            if (dx > L/2) dx -= L; 
+            if (dx < -L/2) dx += L;
+            if (dy > L/2) dy -= L; 
+            if (dy < -L/2) dy += L;
+            if (dz > L/2) dz -= L; 
+            if (dz < -L/2) dz += L;
+
+            double r2 = dx*dx + dy*dy + dz*dz;
+
+            // Apply LJ and Coulomb forces
+            if (r2 < CUTOFF_SQ && r2 > 0.0) {
+                const AtomType& type1 = ATOM_TYPES[sys.type[i]];
+                const AtomType& type2 = ATOM_TYPES[sys.type[j]];
+
+                double sigma = 0.5 * (type1.sigma + type2.sigma);
+                double epsilon = std::sqrt(type1.epsilon * type2.epsilon);
                 
-                // 1D index of current cell
-                int cell_index = cx + cy * dim + cz * dim * dim;
+                double inv_r = 1.0 / std::sqrt(r2);
+                double inv_r2 = inv_r * inv_r;
+                double r = r2 * inv_r;
+                double sig_inv_r2 = sigma * sigma * inv_r2;
+                double sig_inv_r6 = sig_inv_r2 * sig_inv_r2 * sig_inv_r2;
+                double sig_inv_r12 = sig_inv_r6 * sig_inv_r6;
+                double f_lj = (24.0 * epsilon * inv_r2) * (2.0 * sig_inv_r12 - sig_inv_r6);
 
-                // Loop over particles in this cell starting at head
-                int i = cells.head[cell_index];
-                while (i != -1) { 
-                    
-                    // Check a every cell around current cell (3x3x3 block)
-                    for (int nx = cx - 1; nx <= cx + 1; ++nx) {
-                        for (int ny = cy - 1; ny <= cy + 1; ++ny) {
-                            for (int nz = cz - 1; nz <= cz + 1; ++nz) {
-                                
-                                // Periodic wrap for cell indices
-                                int wrapped_nx = (nx + dim) % dim;
-                                int wrapped_ny = (ny + dim) % dim;
-                                int wrapped_nz = (nz + dim) % dim;
-                                
-                                // 1D index of neighbor cell
-                                int neighbor_cell_index = wrapped_nx + wrapped_ny * dim + wrapped_nz * dim * dim;
+                double q1 = type1.charge;
+                double q2 = type2.charge;
+                double coulomb_force = (332.06 * q1 * q2) / r2;
+                double f_elec = coulomb_force * (1.0 / r);
 
-                                // Loop over particles in neighbor cell
-                                int j = cells.head[neighbor_cell_index];
-                                while (j != -1) {
-                                    
-                                    // Avoid double counting and self-interaction
-                                    if (i < j) {
-                                        Particle& p1 = particles[i];
-                                        Particle& p2 = particles[j];
+                double f_total = f_lj + f_elec;
 
-                                        bool excluded = false;
-                                        for (const auto& ex : p1.exclusions) {
-                                            if (ex == p2.id) {
-                                                excluded = true;
-                                                break;
-                                            }
-                                        }
+                f1x += f_total * dx;
+                f1y += f_total * dy;
+                f1z += f_total * dz;
 
-                                        if (!excluded) {
-                                            double dx = p1.position[0] - p2.position[0];
-                                            double dy = p1.position[1] - p2.position[1];
-                                            double dz = p1.position[2] - p2.position[2];
+                double u_lj = 4.0 * epsilon * (sig_inv_r12 - sig_inv_r6);
+                double u_elec = (332.06 * type1.charge * type2.charge) / r;
 
-                                            // Periodic boundary
-                                            if (dx > L/2) dx -= L; 
-                                            if (dx < -L/2) dx += L;
-                                            if (dy > L/2) dy -= L; 
-                                            if (dy < -L/2) dy += L;
-                                            if (dz > L/2) dz -= L; 
-                                            if (dz < -L/2) dz += L;
+                double inv_rc2 = 1.0 / CUTOFF_SQ;
+                double sig_rc2 = sigma * sigma * inv_rc2;
+                double sig_rc6 = sig_rc2 * sig_rc2 * sig_rc2;
+                double sig_rc12 = sig_rc6 * sig_rc6;
+                double u_shift = 4.0 * epsilon * (sig_rc12 - sig_rc6); 
+                double u_elec_shift = (332.06 * type1.charge * type2.charge) / CUTOFF;
 
-                                            double r2 = dx*dx + dy*dy + dz*dz;
-
-                                            // Apply LJ and Coulomb forces
-                                            if (r2 < CUTOFF_SQ && r2 > 0.0) {
-                                                const AtomType& type1 = ATOM_TYPES[p1.type];
-                                                const AtomType& type2 = ATOM_TYPES[p2.type];
-
-                                                double sigma = 0.5 * (type1.sigma + type2.sigma);
-                                                double epsilon = std::sqrt(type1.epsilon * type2.epsilon);
-                                                
-                                                
-                                                double r = std::sqrt(r2);
-                                                double inv_r2 = 1.0 / r2;
-                                                double sig_inv_r2 = sigma * sigma * inv_r2;
-                                                double sig_inv_r6 = sig_inv_r2 * sig_inv_r2 * sig_inv_r2;
-                                                double sig_inv_r12 = sig_inv_r6 * sig_inv_r6;
-                                                double f_lj = (24.0 * epsilon * inv_r2) * (2.0 * sig_inv_r12 - sig_inv_r6);
-
-                                                double q1 = type1.charge;
-                                                double q2 = type2.charge;
-                                                double coulomb_force = (332.06 * q1 * q2) / r2;
-                                                double f_elec = coulomb_force * (1.0 / r);
-
-                                                double f_total = f_lj + f_elec;
-
-                                                double fx = f_total * dx;
-                                                double fy = f_total * dy;
-                                                double fz = f_total * dz;
-
-                                                p1.force[0] += fx; 
-                                                p1.force[1] += fy; 
-                                                p1.force[2] += fz;
-
-                                                p2.force[0] -= fx; 
-                                                p2.force[1] -= fy; 
-                                                p2.force[2] -= fz;
-
-                                                double u_lj = 4.0 * epsilon * (sig_inv_r12 - sig_inv_r6);
-                                                double u_elec = (332.06 * type1.charge * type2.charge) / r;
-
-                                                double inv_rc2 = 1.0 / CUTOFF_SQ;
-                                                double sig_rc2 = sigma * sigma * inv_rc2;
-                                                double sig_rc6 = sig_rc2 * sig_rc2 * sig_rc2;
-                                                double sig_rc12 = sig_rc6 * sig_rc6;
-                                                double u_shift = 4.0 * epsilon * (sig_rc12 - sig_rc6); 
-                                                double u_elec_shift = (332.06 * type1.charge * type2.charge) / CUTOFF;
-
-                                                pe_total += (u_lj - u_shift);
-                                                pe_total += (u_elec - u_elec_shift);
-                                            }
-                                        }
-                                    }
-                                    j = cells.next[j];
-                                }
-                            }
-                        }
-                    }
-                    i = cells.next[i];
-                }
+                local_pe += 0.5 * (u_lj - u_shift);
+                local_pe += 0.5 * (u_elec - u_elec_shift);
             }
         }
+        sys.fx[i] += f1x;
+        sys.fy[i] += f1y;
+        sys.fz[i] += f1z;
+        global_pe += local_pe;
+    }
+    pe_total += global_pe;
+}
+
+void verlet_first_step(System& sys, double dt) {
+    #pragma omp parallel for
+    for (size_t i = 0; i < sys.x.size(); ++i) {
+        double m = ATOM_TYPES[sys.type[i]].mass;
+        double acc_factor = F_TO_ACC / m; 
+
+        // Update Velocities
+        sys.vx[i] += 0.5 * sys.fx[i] * acc_factor * dt;
+        sys.vy[i] += 0.5 * sys.fy[i] * acc_factor * dt;
+        sys.vz[i] += 0.5 * sys.fz[i] * acc_factor * dt;
+
+        // Update Positions
+        sys.x[i] += sys.vx[i] * dt;
+        sys.y[i] += sys.vy[i] * dt;
+        sys.z[i] += sys.vz[i] * dt;
+
+        // Periodic Boundaries
+        if (sys.x[i] < 0) sys.x[i] += L; 
+        if (sys.x[i] >= L) sys.x[i] -= L;
+        if (sys.y[i] < 0) sys.y[i] += L; 
+        if (sys.y[i] >= L) sys.y[i] -= L;
+        if (sys.z[i] < 0) sys.z[i] += L; 
+        if (sys.z[i] >= L) sys.z[i] -= L;
     }
 }
 
-// Periodic boundary condition
-void apply_periodic_bc(Particle& p) {
-    for (int i = 0; i < 3; ++i) {
-        if (p.position[i] < 0.0) {
-            p.position[i] += L;
-        } else if (p.position[i] >= L) {
-            p.position[i] -= L;
-        }
-    }
-}
-
-// Reflective boundary condition
-void apply_reflective_bc(Particle& p) {
-    for (int i = 0; i < 3; ++i) {
-        if (p.position[i] < 0.0) {
-            p.position[i] = -p.position[i];
-            p.velocity[i] = -p.velocity[i];
-        } else if (p.position[i] > L) {
-            p.position[i] = 2 * L - p.position[i];
-            p.velocity[i] = -p.velocity[i];
-        }
-    }
-}
-
-void verlet_first_step(std::span<Particle> particles, double dt) {
-    for (auto& p : particles) {
-        double m = ATOM_TYPES[p.type].mass;
+void verlet_second_step(System& sys, double dt) {
+    #pragma omp parallel for
+    for (size_t i = 0; i < sys.x.size(); ++i) {
+        double m = ATOM_TYPES[sys.type[i]].mass;
         double acc_factor = F_TO_ACC / m;
 
-        for (int i = 0; i < 3; ++i) {
-            p.velocity[i] += 0.5 * acc_factor * p.force[i] * dt;
-            p.position[i] += p.velocity[i] * dt;
-        }
-
-        if (BC == BoundaryCondition::PERIODIC) {
-            apply_periodic_bc(p);
-        }
-        else {
-            apply_reflective_bc(p);
-        }
+        sys.vx[i] += 0.5 * acc_factor * sys.fx[i] * dt;
+        sys.vy[i] += 0.5 * acc_factor * sys.fy[i] * dt;
+        sys.vz[i] += 0.5 * acc_factor * sys.fz[i] * dt;
     }
 }
 
-void verlet_second_step(std::span<Particle> particles, double dt) {
-    for (auto& p : particles) {
-        double m = ATOM_TYPES[p.type].mass;
-        double acc_factor = F_TO_ACC / m;
-
-        for (int i = 0; i < 3; ++i) {
-            p.velocity[i] += 0.5 * acc_factor * p.force[i] * dt;
-        }
-    }
-}
-
-void save_frame(int step, const std::vector<Particle>& particles) {
+void save_frame(int step, const System& sys) {
     std::string filename = "dumps/t" + std::to_string(step) + ".dump";
     std::ofstream data(filename);
     
     data << "ITEM: TIMESTEP\n" << step << "\n";
-    data << "ITEM: NUMBER OF ATOMS\n" << particles.size() << "\n";
+    data << "ITEM: NUMBER OF ATOMS\n" << sys.x.size() << "\n";
     data << "ITEM: BOX BOUNDS pp pp pp\n";
     data << "0.0 " << L << "\n0.0 " << L << "\n0.0 " << L << "\n";
     data << "ITEM: ATOMS id type x y z vx vy vz\n";
 
-    for (size_t i = 0; i < particles.size(); ++i) {
-        const auto& p = particles[i];
-        data << i << " " << p.type << " " 
-             << p.position[0] << " " << p.position[1] << " " << p.position[2] << " "
-             << p.velocity[0] << " " << p.velocity[1] << " " << p.velocity[2] << "\n";
+    for (size_t i = 0; i < sys.x.size(); ++i) {
+        data << i << " " << sys.type[i] << " " 
+             << sys.x[i] << " " << sys.y[i] << " " << sys.z[i] << " "
+             << sys.vx[i] << " " << sys.vy[i] << " " << sys.vz[i] << "\n";
     }
     
     data.close();
 }
 
-double compute_kinetic_energy(const std::vector<Particle>& particles) {
+double compute_kinetic_energy(const System& sys) {
     double ke = 0.0;
-    for (const auto& p : particles) {
-        double v2 = p.velocity[0]*p.velocity[0] + 
-                    p.velocity[1]*p.velocity[1] + 
-                    p.velocity[2]*p.velocity[2];
-        double m = ATOM_TYPES[p.type].mass;
+    for (size_t i = 0; i < sys.x.size(); ++i) {
+        double v2 = sys.vx[i]*sys.vx[i] + 
+                    sys.vy[i]*sys.vy[i] + 
+                    sys.vz[i]*sys.vz[i];
+        double m = ATOM_TYPES[sys.type[i]].mass;
         ke += 0.5 * m * v2;
     }
     double ke_cal = ke * KE_TO_KCAL;
     return ke_cal;
 }
 
-void rescale_velocities(std::vector<Particle>& particles, double target_temp) {
-    double ke = compute_kinetic_energy(particles);
-    double dof = 3.0 * (particles.size() - 1.0);
+void rescale_velocities(System& sys, double target_temp) {
+    double ke = compute_kinetic_energy(sys);
+    double dof = 3.0 * (sys.x.size() - 1.0);
     double current_temp = 2.0 * ke / (dof * kb);
     double scale_factor = std::sqrt(target_temp / current_temp);
 
-    for (auto& p : particles) {
-        for (int i = 0; i < 3; ++i) {
-            p.velocity[i] *= scale_factor;
-        }
+    for (size_t i = 0; i < sys.x.size(); ++i) {
+        sys.vx[i] *= scale_factor;
+        sys.vy[i] *= scale_factor;
+        sys.vz[i] *= scale_factor;
     }
 }
 
 int main() {
     std::filesystem::create_directory("dumps");
-
     std::ofstream energy_file("energy.csv");
     energy_file << "Time,Kinetic,Potential,Total,Temperature\n";
 
-    std::vector<Particle> particles(num_molecules * 3);
+    System sys;
     std::vector<Bond> bonds;
     std::vector<Angle> angles;
-    init_water_box(particles, bonds, angles);
-    std::cout << "Water box initialized. Created " << bonds.size() << " bonds.\n";
+    init_water_box(sys, bonds, angles);
 
-    CellList cells(L, CUTOFF, particles.size());
-    std::cout << "Starting Simulation with " << particles.size() << " particles.\n";
+    CellList cells(L, VERLET_CUTOFF, sys.x.size());
+    std::cout << "Starting Simulation with " << sys.x.size() << " particles.\n";
     
     double pe = 0.0;
-    std::cout << "Computing initial forces...\n";
-    compute_bond_forces(particles, bonds, pe);
-    compute_angle_forces(particles, angles, pe);
-    compute_forces(particles, cells, pe);
 
-    std::cout << "Initial forces computed.\n";
-
-    std::cout << "Minimizing energy...\n";
+    // Warmup phase
     double dt_warmup = 0.01;
     double max_force = 100.0;
+    build_verlet_lists(sys, cells);
     for (int i = 0; i < 100; ++i) {
-        verlet_first_step(particles, dt_warmup);
-        for(auto& p : particles) {
-            p.force = {0,0,0};
-        }
-        
+        verlet_first_step(sys, dt_warmup);
+        std::fill(sys.fx.begin(), sys.fx.end(), 0.0);
+        std::fill(sys.fy.begin(), sys.fy.end(), 0.0);
+        std::fill(sys.fz.begin(), sys.fz.end(), 0.0);
         double pe_dummy = 0;
-        compute_bond_forces(particles, bonds, pe_dummy);
-        compute_angle_forces(particles, angles, pe_dummy);
-        compute_forces(particles, cells, pe_dummy);
-        
+        compute_bond_forces(sys, bonds, pe_dummy);
+        compute_angle_forces(sys, angles, pe_dummy);
+        compute_forces(sys, pe_dummy);
         // Cap forces to avoid instability
-        for(auto& p : particles) {
-            for(int k=0; k<3; ++k) {
-                if (p.force[k] > max_force) p.force[k] = max_force;
-                if (p.force[k] < -max_force) p.force[k] = -max_force;
-            }
+        for (size_t i = 0; i < sys.x.size(); ++i) {
+            if (sys.fx[i] > max_force) sys.fx[i] = max_force;
+            if (sys.fx[i] < -max_force) sys.fx[i] = -max_force;
+            if (sys.fy[i] > max_force) sys.fy[i] = max_force;
+            if (sys.fy[i] < -max_force) sys.fy[i] = -max_force;
+            if (sys.fz[i] > max_force) sys.fz[i] = max_force;
+            if (sys.fz[i] < -max_force) sys.fz[i] = -max_force;
         }
-        verlet_second_step(particles, dt_warmup);
+        verlet_second_step(sys, dt_warmup);
         if (i % 50 == 0) max_force += 50.0;
     }
     std::cout << "Warmup done. Starting main run.\n";
 
-    for(auto& p : particles) {
-        p.force = {0,0,0};
-    }
-    rescale_velocities(particles, target_temp);
+    std::fill(sys.fx.begin(), sys.fx.end(), 0.0);
+    std::fill(sys.fy.begin(), sys.fy.end(), 0.0);
+    std::fill(sys.fz.begin(), sys.fz.end(), 0.0);
+    rescale_velocities(sys, target_temp);
 
+    auto start_time = std::chrono::high_resolution_clock::now();
     int steps = static_cast<int>(t_max / dt);
     for (int step = 0; step < steps; ++step) {
-        verlet_first_step(particles, dt);
-        for (auto& p : particles) {
-            p.force = {0.0, 0.0, 0.0};
+        verlet_first_step(sys, dt);
+        std::fill(sys.fx.begin(), sys.fx.end(), 0.0);
+        std::fill(sys.fy.begin(), sys.fy.end(), 0.0);
+        std::fill(sys.fz.begin(), sys.fz.end(), 0.0);
+        if (step % 20 == 0) {
+            build_verlet_lists(sys, cells);
         }
         pe = 0.0;
-        compute_bond_forces(particles, bonds, pe);
-        compute_angle_forces(particles, angles, pe);
-        compute_forces(particles, cells, pe);
-        verlet_second_step(particles, dt);
+        compute_bond_forces(sys, bonds, pe);
+        compute_angle_forces(sys, angles, pe);
+        compute_forces(sys, pe);
+        verlet_second_step(sys, dt);
 
         if (step % 10 == 0) {
 
             if (ensemble == Ensemble::NVT) {
-                rescale_velocities(particles, target_temp);
+                rescale_velocities(sys, target_temp);
             }
 
-            save_frame(step, particles);
+            save_frame(step, sys);
 
-            double ke = compute_kinetic_energy(particles);
+            double ke = compute_kinetic_energy(sys);
             double total = ke + pe;
 
-            double dof = 3.0 * (particles.size() - 1.0);
+            double dof = 3.0 * (sys.x.size() - 1.0);
             double current_temp = 2.0 * ke / (dof * kb);
 
             energy_file << step * dt << "," << ke << "," << pe << "," << total << "," << current_temp << "\n";
-
+            
             if (step % 100 == 0) {
                 std::cout << "Step " << step << " / " << steps << "\r" << std::flush;
             }
@@ -656,6 +669,10 @@ int main() {
 
     }
     energy_file.close();
-    std::cout << "\nDone.\n";
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = end_time - start_time;
+    std::cout << "Simulation completed in " << duration.count() << " seconds.\n";
+    
     return 0;
 }

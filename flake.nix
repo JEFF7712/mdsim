@@ -31,6 +31,8 @@
             python3Packages.matplotlib
           ];
 
+          NIX_ENFORCE_NO_NATIVE = "0";
+
           shellHook = ''
             echo "C++20 Environment Loaded (GCC $(gcc --version | head -n1 | awk '{print $3}'))"
             export CC=gcc
