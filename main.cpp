@@ -6,6 +6,7 @@
 #include <chrono>
 #include <string>
 #include <omp.h>
+#include "gpu_interface.h"
 
 // Distance: Angstroms (Å)
 // Time: femtoseconds (fs)
@@ -81,7 +82,6 @@ struct System {
     std::vector<int> type;
     std::vector<int> id;
     std::vector<std::vector<int>> exclusions;
-    std::vector<std::vector<int>> neighbors;
 
     void resize(int n) {
         x.resize(n); y.resize(n); z.resize(n);
@@ -90,7 +90,6 @@ struct System {
         type.resize(n);
         id.resize(n);
         exclusions.resize(n);
-        neighbors.resize(n);
     }
 };
 
@@ -153,140 +152,6 @@ void init_water_box(System& sys, std::vector<Bond>& bonds, std::vector<Angle>& a
         }
     }
 }
-
-struct CellList {
-    double cell_size;
-    int grid_dim;
-    int num_cells;
-
-    std::vector<int> head;
-    std::vector<int> next;
-
-    CellList(double box_length, double cutoff, int num_particles) {
-        // How many cells fit in the box
-        grid_dim = static_cast<int>(std::floor(box_length / cutoff));
-        // At least one cell
-        if (grid_dim == 0) grid_dim = 1; 
-        
-        // Actual size of cell
-        cell_size = box_length / grid_dim;
-
-        // Total number of cells 
-        num_cells = grid_dim * grid_dim * grid_dim;
-
-        // Resize arrays to match number of cells and particles
-        head.resize(num_cells);
-        next.resize(num_particles);
-    }
-
-    // Convert position to cell index
-    int get_cell_index(double x, double y, double z) const {
-
-        // Wrap positions to be within box using mod
-        x = std::fmod(x, L);
-        if (x < 0.0) x += L;
-        
-        y = std::fmod(y, L);
-        if (y < 0.0) y += L;
-        
-        z = std::fmod(z, L);
-        if (z < 0.0) z += L;
-
-        // Find cell coordinates
-        int cx = static_cast<int>(x / cell_size);
-        int cy = static_cast<int>(y / cell_size);
-        int cz = static_cast<int>(z / cell_size);
-        
-        // Ensure cell indices are within bounds
-        cx = std::min(cx, grid_dim - 1);
-        cy = std::min(cy, grid_dim - 1);
-        cz = std::min(cz, grid_dim - 1);
-
-        // Flatten 3D index to 1D
-        return cx + cy * grid_dim + cz * grid_dim * grid_dim;
-    }
-
-    void build(const System& sys) {
-
-        // Fill head with -1 (-1 indicates last particle in cell)
-        std::fill(head.begin(), head.end(), -1);
-
-        // Assign each particle to a cell
-        for (int i = 0; i < sys.x.size(); ++i) {
-            int cell = get_cell_index(sys.x[i], sys.y[i], sys.z[i]);
-
-            next[i] = head[cell];
-            head[cell] = i;
-        }
-    }
-
-
-};
-
-void build_verlet_lists(System& sys, CellList& cells) {
-    cells.build(sys);
-    int dim = cells.grid_dim;
-
-    #pragma omp parallel for schedule(dynamic) collapse(3)
-    for (int cx = 0; cx < dim; ++cx) {
-        for (int cy = 0; cy < dim; ++cy) {
-            for (int cz = 0; cz < dim; ++cz) {
-                int cell_index = cx + cy * dim + cz * dim * dim;
-                int i = cells.head[cell_index];
-
-                while (i != -1) {
-                    // Clear old list
-                    sys.neighbors[i].clear();
-                    
-                    // Guess ~100 neighbors
-                    sys.neighbors[i].reserve(100); 
-
-                    // Search 3x3x3 block
-                    for (int nx = cx - 1; nx <= cx + 1; ++nx) {
-                        for (int ny = cy - 1; ny <= cy + 1; ++ny) {
-                            for (int nz = cz - 1; nz <= cz + 1; ++nz) {
-                                int wrapped_nx = (nx + dim) % dim;
-                                int wrapped_ny = (ny + dim) % dim;
-                                int wrapped_nz = (nz + dim) % dim;
-                                int neighbor_cell = wrapped_nx + wrapped_ny * dim + wrapped_nz * dim * dim;
-
-                                int j = cells.head[neighbor_cell];
-                                while (j != -1) {
-                                    if (i != j) {
-                                        
-                                        // Squared Distance Check
-                                        double dx = sys.x[i] - sys.x[j];
-                                        double dy = sys.y[i] - sys.y[j];
-                                        double dz = sys.z[i] - sys.z[j];
-                                        
-                                        if (dx > L/2) dx -= L; if (dx < -L/2) dx += L;
-                                        if (dy > L/2) dy -= L; if (dy < -L/2) dy += L;
-                                        if (dz > L/2) dz -= L; if (dz < -L/2) dz += L;
-
-                                        double r2 = dx*dx + dy*dy + dz*dz;
-
-                                        if (r2 < VERLET_CUTOFF_SQ) {
-                                            bool excluded = false;
-                                            for (int ex : sys.exclusions[i]) {
-                                                if (ex == j) { excluded = true; break; }
-                                            }
-                                            if (!excluded) {
-                                                sys.neighbors[i].push_back(j);
-                                            }
-                                        }
-                                    }
-                                    j = cells.next[j];
-                                }
-                            }
-                        }
-                    }
-                    i = cells.next[i];
-                }
-            }
-        }
-    }
-}
-
 
 void compute_bond_forces(System& sys, const std::vector<Bond>& bonds, double& pe_total) {
     double local_pe = 0.0;
@@ -425,82 +290,8 @@ void compute_angle_forces(System& sys, const std::vector<Angle>& angles, double&
     pe_total += local_pe;
 } 
 
-void compute_forces(System& sys, double& pe_total) {
-    double global_pe = 0.0;
-    
-    // Loop over all cells
-    #pragma omp parallel for schedule(dynamic) reduction(+:global_pe)
-    for (int i = 0; i < sys.x.size(); ++i) {
-        double f1x = 0.0;
-        double f1y = 0.0;
-        double f1z = 0.0;
-        double local_pe = 0.0;
-        const AtomType& type1 = ATOM_TYPES[sys.type[i]];
-        for (int j : sys.neighbors[i]) {
-            double dx = sys.x[i] - sys.x[j];
-            double dy = sys.y[i] - sys.y[j];
-            double dz = sys.z[i] - sys.z[j];
-
-            // Periodic boundary
-            if (dx > L/2) dx -= L; 
-            if (dx < -L/2) dx += L;
-            if (dy > L/2) dy -= L; 
-            if (dy < -L/2) dy += L;
-            if (dz > L/2) dz -= L; 
-            if (dz < -L/2) dz += L;
-
-            double r2 = dx*dx + dy*dy + dz*dz;
-
-            // Apply LJ and Coulomb forces
-            if (r2 < CUTOFF_SQ && r2 > 0.0) {
-                const AtomType& type1 = ATOM_TYPES[sys.type[i]];
-                const AtomType& type2 = ATOM_TYPES[sys.type[j]];
-
-                double sigma = 0.5 * (type1.sigma + type2.sigma);
-                double epsilon = std::sqrt(type1.epsilon * type2.epsilon);
-                
-                double inv_r = 1.0 / std::sqrt(r2);
-                double inv_r2 = inv_r * inv_r;
-                double r = r2 * inv_r;
-                double sig_inv_r2 = sigma * sigma * inv_r2;
-                double sig_inv_r6 = sig_inv_r2 * sig_inv_r2 * sig_inv_r2;
-                double sig_inv_r12 = sig_inv_r6 * sig_inv_r6;
-                double f_lj = (24.0 * epsilon * inv_r2) * (2.0 * sig_inv_r12 - sig_inv_r6);
-
-                double q1 = type1.charge;
-                double q2 = type2.charge;
-                double coulomb_force = (332.06 * q1 * q2) / r2;
-                double f_elec = coulomb_force * (1.0 / r);
-
-                double f_total = f_lj + f_elec;
-
-                f1x += f_total * dx;
-                f1y += f_total * dy;
-                f1z += f_total * dz;
-
-                double u_lj = 4.0 * epsilon * (sig_inv_r12 - sig_inv_r6);
-                double u_elec = (332.06 * type1.charge * type2.charge) / r;
-
-                double inv_rc2 = 1.0 / CUTOFF_SQ;
-                double sig_rc2 = sigma * sigma * inv_rc2;
-                double sig_rc6 = sig_rc2 * sig_rc2 * sig_rc2;
-                double sig_rc12 = sig_rc6 * sig_rc6;
-                double u_shift = 4.0 * epsilon * (sig_rc12 - sig_rc6); 
-                double u_elec_shift = (332.06 * type1.charge * type2.charge) / CUTOFF;
-
-                local_pe += 0.5 * (u_lj - u_shift);
-                local_pe += 0.5 * (u_elec - u_elec_shift);
-            }
-        }
-        sys.fx[i] += f1x;
-        sys.fy[i] += f1y;
-        sys.fz[i] += f1z;
-        global_pe += local_pe;
-    }
-    pe_total += global_pe;
-}
-
 void verlet_first_step(System& sys, double dt) {
+    const double MAX_DISP = 0.1;
     #pragma omp parallel for
     for (size_t i = 0; i < sys.x.size(); ++i) {
         double m = ATOM_TYPES[sys.type[i]].mass;
@@ -511,10 +302,27 @@ void verlet_first_step(System& sys, double dt) {
         sys.vy[i] += 0.5 * sys.fy[i] * acc_factor * dt;
         sys.vz[i] += 0.5 * sys.fz[i] * acc_factor * dt;
 
+        // Limit Maximum Displacement
+        double dx = sys.vx[i] * dt;
+        double dy = sys.vy[i] * dt;
+        double dz = sys.vz[i] * dt;
+        double dist_sq = dx*dx + dy*dy + dz*dz;
+        if (dist_sq > MAX_DISP * MAX_DISP) {
+            double dist = std::sqrt(dist_sq);
+            double scale = MAX_DISP / dist;
+            dx *= scale;
+            dy *= scale;
+            dz *= scale;
+            
+            sys.vx[i] *= scale;
+            sys.vy[i] *= scale;
+            sys.vz[i] *= scale;
+        }
+
         // Update Positions
-        sys.x[i] += sys.vx[i] * dt;
-        sys.y[i] += sys.vy[i] * dt;
-        sys.z[i] += sys.vz[i] * dt;
+        sys.x[i] += dx;
+        sys.y[i] += dy;
+        sys.z[i] += dz;
 
         // Periodic Boundaries
         if (sys.x[i] < 0) sys.x[i] += L; 
@@ -568,6 +376,25 @@ double compute_kinetic_energy(const System& sys) {
     }
     double ke_cal = ke * KE_TO_KCAL;
     return ke_cal;
+}
+
+void randomize_velocities(System& sys, double temp) {
+    std::normal_distribution<double> dist(0.0, 1.0);
+    for (size_t i = 0; i < sys.x.size(); ++i) {
+        double m = ATOM_TYPES[sys.type[i]].mass;
+        double sigma = std::sqrt(kb * temp / (m * F_TO_ACC / 4.184e-4));
+        sys.vx[i] = dist(get_rng());
+        sys.vy[i] = dist(get_rng());
+        sys.vz[i] = dist(get_rng());
+    }
+    // Rescale to exact temp
+    double ke = compute_kinetic_energy(sys);
+    double dof = 3.0 * (sys.x.size() - 1.0);
+    double current_temp = 2.0 * ke / (dof * kb);
+    double scale = std::sqrt(temp / current_temp);
+    for (size_t i=0; i<sys.x.size(); ++i) {
+        sys.vx[i] *= scale; sys.vy[i] *= scale; sys.vz[i] *= scale;
+    }
 }
 
 void rescale_velocities(System& sys, double target_temp) {
@@ -630,7 +457,6 @@ struct RDF {
                 if (r < max_r) {
                     int bin = static_cast<int>(r / bin_width);
                     if (bin < num_bins) {
-                        // Add 2 because we
                         histogram[bin] += 2.0;
                     }
                 }
@@ -642,23 +468,19 @@ struct RDF {
         std::ofstream file(filename);
         file << "r,g_r\n";
 
-        // Bulk density of type 1 atoms (Number density)
         // rho = N / V
         double vol_box = L * L * L;
         double rho = total_type1 / vol_box;
 
         for (int i = 0; i < num_bins; ++i) {
-            double r = (i + 0.5) * bin_width; // Midpoint of bin
+            double r = (i + 0.5) * bin_width;
             
-            // Volume of the spherical shell at distance r
             // V_shell = 4 * pi * r^2 * dr
             double vol_shell = 4.0 * 3.14159 * r * r * bin_width;
 
-            // Theoretical number of particles in this shell if gas was ideal
             double ideal_count = rho * vol_shell;
 
-            // Normalization:
-            // g(r) = (Actual Count / Frames) / (Ideal Count * Total Reference Particles)
+            // Normalization
             double g_r = (histogram[i] / num_frames) / (ideal_count * total_type1);
 
             file << r << "," << g_r << "\n";
@@ -669,6 +491,7 @@ struct RDF {
 };
 
 int main() {
+
     std::filesystem::create_directory("dumps");
     std::ofstream energy_file("energy.csv");
     energy_file << "Time,Kinetic,Potential,Total,Temperature\n";
@@ -678,7 +501,13 @@ int main() {
     std::vector<Angle> angles;
     init_water_box(sys, bonds, angles);
 
-    CellList cells(L, VERLET_CUTOFF, sys.x.size());
+    int grid_dim = std::floor(L / VERLET_CUTOFF); 
+    if (grid_dim < 3) grid_dim = 3; 
+    double cell_size = L / grid_dim;
+
+    SystemGPU gpu;
+    gpu.allocate(sys.x.size(), 1000, grid_dim);
+
     std::cout << "Starting Simulation with " << sys.x.size() << " particles.\n";
     
     double pe = 0.0;
@@ -686,51 +515,42 @@ int main() {
     // Warmup phase
     double dt_warmup = 0.01;
     double max_force = 100.0;
-    build_verlet_lists(sys, cells);
-    for (int i = 0; i < 100; ++i) {
+    for (int i = 0; i < 2000; ++i) {
         verlet_first_step(sys, dt_warmup);
-        std::fill(sys.fx.begin(), sys.fx.end(), 0.0);
-        std::fill(sys.fy.begin(), sys.fy.end(), 0.0);
-        std::fill(sys.fz.begin(), sys.fz.end(), 0.0);
+        std::fill(sys.vx.begin(), sys.vx.end(), 0.0);
+        std::fill(sys.vy.begin(), sys.vy.end(), 0.0);
+        std::fill(sys.vz.begin(), sys.vz.end(), 0.0);
+        build_and_compute_gpu(
+            sys.x.size(),
+            sys.x.data(), sys.y.data(), sys.z.data(), sys.type.data(),
+            sys.fx.data(), sys.fy.data(), sys.fz.data(),
+            gpu, L, CUTOFF_SQ, cell_size, grid_dim, true
+        );
         double pe_dummy = 0;
         compute_bond_forces(sys, bonds, pe_dummy);
         compute_angle_forces(sys, angles, pe_dummy);
-        compute_forces(sys, pe_dummy);
-        // Cap forces to avoid instability
-        for (size_t i = 0; i < sys.x.size(); ++i) {
-            if (sys.fx[i] > max_force) sys.fx[i] = max_force;
-            if (sys.fx[i] < -max_force) sys.fx[i] = -max_force;
-            if (sys.fy[i] > max_force) sys.fy[i] = max_force;
-            if (sys.fy[i] < -max_force) sys.fy[i] = -max_force;
-            if (sys.fz[i] > max_force) sys.fz[i] = max_force;
-            if (sys.fz[i] < -max_force) sys.fz[i] = -max_force;
-        }
-        verlet_second_step(sys, dt_warmup);
-        if (i % 50 == 0) max_force += 50.0;
     }
-    std::cout << "Warmup done. Starting main run.\n";
+    std::cout << "Warmup Done.\n";
 
-    std::fill(sys.fx.begin(), sys.fx.end(), 0.0);
-    std::fill(sys.fy.begin(), sys.fy.end(), 0.0);
-    std::fill(sys.fz.begin(), sys.fz.end(), 0.0);
-    rescale_velocities(sys, target_temp);
+    randomize_velocities(sys, target_temp);
 
     RDF rdf(10.0, 0.1);
 
     auto start_time = std::chrono::high_resolution_clock::now();
     int steps = static_cast<int>(t_max / dt);
+
     for (int step = 0; step < steps; ++step) {
         verlet_first_step(sys, dt);
-        std::fill(sys.fx.begin(), sys.fx.end(), 0.0);
-        std::fill(sys.fy.begin(), sys.fy.end(), 0.0);
-        std::fill(sys.fz.begin(), sys.fz.end(), 0.0);
-        if (step % 20 == 0) {
-            build_verlet_lists(sys, cells);
-        }
+        bool rebuild = (step % 5 == 0);
+        build_and_compute_gpu(
+            sys.x.size(),
+            sys.x.data(), sys.y.data(), sys.z.data(), sys.type.data(),
+            sys.fx.data(), sys.fy.data(), sys.fz.data(),
+            gpu, L, CUTOFF_SQ, cell_size, grid_dim, rebuild
+        );
         pe = 0.0;
         compute_bond_forces(sys, bonds, pe);
         compute_angle_forces(sys, angles, pe);
-        compute_forces(sys, pe);
         verlet_second_step(sys, dt);
 
         if (step % 10 == 0) {
@@ -749,10 +569,10 @@ int main() {
 
             energy_file << step * dt << "," << ke << "," << pe << "," << total << "," << current_temp << "\n";
 
-            if (step % 50 == 0 && step > 1000) {
-                rdf.accumulate(sys, L);
-            }
             if (step % 100 == 0) {
+                if (step > 1000) {
+                    rdf.accumulate(sys, L);
+                }
                 std::cout << "Step " << step << " / " << steps << "\r" << std::flush;
             }
         }
@@ -766,5 +586,6 @@ int main() {
     std::chrono::duration<double> duration = end_time - start_time;
     std::cout << "Simulation completed in " << duration.count() << " seconds.\n";
     
+    gpu.cleanup();
     return 0;
 }
