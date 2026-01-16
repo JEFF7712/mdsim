@@ -493,7 +493,7 @@ struct RDF {
 int main() {
 
     std::filesystem::create_directory("dumps");
-    std::ofstream energy_file("scripts/energy.csv");
+    std::ofstream energy_file("energy.csv");
     energy_file << "Time,Kinetic,Potential,Total,Temperature\n";
 
     System sys;
@@ -580,7 +580,7 @@ int main() {
     }
     energy_file.close();
     int num_type1 = num_molecules;
-    rdf.write_file("scripts/rdf.csv", L, num_type1);
+    rdf.write_file("rdf.csv", L, num_type1);
 
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> duration = end_time - start_time;

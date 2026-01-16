@@ -2,5 +2,5 @@
 .cache
 build
 dumps
-energy.csv
-rdf.csv
+*.csv
+*.png

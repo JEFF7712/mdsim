@@ -5,13 +5,13 @@ L = 31.0; // Box length (Angstroms)
 dt = 0.5; // Time step (fs)
 t_max = 50.0; // Maximum simulation time (fs)
 
-## Before - no openMP
+## Before - 1 core / no parallelization
 1. Simulation completed in 14.0267 seconds.
 2. Simulation completed in 14.1268 seconds.
 3. Simulation completed in 13.9361 seconds.
 min: 13.9361
 
-## After - openMP
+## After - openMP parallelization
 1. Simulation completed in 2.87121 seconds.
 2. Simulation completed in 2.46077 seconds.
 3. Simulation completed in 2.50393 seconds.
