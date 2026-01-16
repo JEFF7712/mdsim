@@ -29,6 +29,7 @@
             python3
             python3Packages.pandas
             python3Packages.matplotlib
+            python3Packages.scipy
           ];
 
           NIX_ENFORCE_NO_NATIVE = "0";

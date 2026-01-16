@@ -18,7 +18,7 @@
 const int num_molecules = 1000; // Number of molecules
 const double L = 31.0; // Box length (Angstroms)
 const double dt = 0.5; // Time step (fs)
-const double t_max = 2500.0; // Maximum simulation time (fs)
+const double t_max = 5000.0; // Maximum simulation time (fs)
 enum class Ensemble { NVE, NVT };
 const Ensemble ensemble = Ensemble::NVT; // Ensemble type
 const double kb = 0.001987204; // Boltzmann constant (kcal/mol/K)
@@ -583,6 +583,91 @@ void rescale_velocities(System& sys, double target_temp) {
     }
 }
 
+struct RDF {
+    std::vector<double> histogram;
+    double max_r;
+    double bin_width;
+    int num_bins;
+    int num_frames;
+
+    RDF(double cutoff_dist, double width) {
+        max_r = cutoff_dist;
+        bin_width = width;
+        num_bins = static_cast<int>(max_r / bin_width) + 1;
+        histogram.resize(num_bins, 0.0);
+        num_frames = 0;
+    }
+
+    void accumulate(const System& sys, double L) {
+        num_frames++;
+        
+        // Collect indices of all type 1 atoms
+        std::vector<int> type1_indices;
+        type1_indices.reserve(sys.x.size() / 3);
+        for (size_t i = 0; i < sys.x.size(); ++i) {
+            if (sys.type[i] == 1) type1_indices.push_back(i);
+        }
+
+        // Loop over unique pairs of type 1 atoms
+        for (size_t i = 0; i < type1_indices.size(); ++i) {
+            int idx_i = type1_indices[i];
+            
+            for (size_t j = i + 1; j < type1_indices.size(); ++j) {
+                int idx_j = type1_indices[j];
+
+                double dx = sys.x[idx_i] - sys.x[idx_j];
+                double dy = sys.y[idx_i] - sys.y[idx_j];
+                double dz = sys.z[idx_i] - sys.z[idx_j];
+
+                // Minimum Image Convention
+                if (dx > L/2) dx -= L; if (dx < -L/2) dx += L;
+                if (dy > L/2) dy -= L; if (dy < -L/2) dy += L;
+                if (dz > L/2) dz -= L; if (dz < -L/2) dz += L;
+
+                double r2 = dx*dx + dy*dy + dz*dz;
+                double r = std::sqrt(r2);
+
+                if (r < max_r) {
+                    int bin = static_cast<int>(r / bin_width);
+                    if (bin < num_bins) {
+                        // Add 2 because we
+                        histogram[bin] += 2.0;
+                    }
+                }
+            }
+        }
+    }
+
+    void write_file(const std::string& filename, double L, int total_type1) {
+        std::ofstream file(filename);
+        file << "r,g_r\n";
+
+        // Bulk density of type 1 atoms (Number density)
+        // rho = N / V
+        double vol_box = L * L * L;
+        double rho = total_type1 / vol_box;
+
+        for (int i = 0; i < num_bins; ++i) {
+            double r = (i + 0.5) * bin_width; // Midpoint of bin
+            
+            // Volume of the spherical shell at distance r
+            // V_shell = 4 * pi * r^2 * dr
+            double vol_shell = 4.0 * 3.14159 * r * r * bin_width;
+
+            // Theoretical number of particles in this shell if gas was ideal
+            double ideal_count = rho * vol_shell;
+
+            // Normalization:
+            // g(r) = (Actual Count / Frames) / (Ideal Count * Total Reference Particles)
+            double g_r = (histogram[i] / num_frames) / (ideal_count * total_type1);
+
+            file << r << "," << g_r << "\n";
+        }
+        file.close();
+        std::cout << "RDF written to " << filename << "\n";
+    }
+};
+
 int main() {
     std::filesystem::create_directory("dumps");
     std::ofstream energy_file("energy.csv");
@@ -630,6 +715,8 @@ int main() {
     std::fill(sys.fz.begin(), sys.fz.end(), 0.0);
     rescale_velocities(sys, target_temp);
 
+    RDF rdf(10.0, 0.1);
+
     auto start_time = std::chrono::high_resolution_clock::now();
     int steps = static_cast<int>(t_max / dt);
     for (int step = 0; step < steps; ++step) {
@@ -661,7 +748,10 @@ int main() {
             double current_temp = 2.0 * ke / (dof * kb);
 
             energy_file << step * dt << "," << ke << "," << pe << "," << total << "," << current_temp << "\n";
-            
+
+            if (step % 50 == 0 && step > 1000) {
+                rdf.accumulate(sys, L);
+            }
             if (step % 100 == 0) {
                 std::cout << "Step " << step << " / " << steps << "\r" << std::flush;
             }
@@ -669,6 +759,8 @@ int main() {
 
     }
     energy_file.close();
+    int num_type1 = num_molecules;
+    rdf.write_file("rdf.csv", L, num_type1);
 
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> duration = end_time - start_time;
