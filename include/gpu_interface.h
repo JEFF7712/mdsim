@@ -24,10 +24,15 @@ struct SystemGPU {
     int max_neighbors;
     int num_cells;
 
+    double *d_sigma;
+    double *d_epsilon;
+    double *d_charge;
+
     double *d_energy;
 
     void allocate(int num_atoms, int max_n, int grid_dim);
     void cleanup();
+    void set_atom_params(int num_types, const double* h_sigma, const double* h_epsilon, const double* h_charge);
 };
 
 void build_and_compute_gpu(

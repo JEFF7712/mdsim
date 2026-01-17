@@ -16,7 +16,6 @@ const double KE_TO_KCAL = 2390.057; // [amu * (A/fs)^2] -> [kcal/mol]
 
 // Random number generator
 std::mt19937& get_rng() {
-    // static unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
     static unsigned seed = 42;
     static std::mt19937 engine(seed);
     return engine;
@@ -29,6 +28,14 @@ struct AtomType {
     double sigma; // Angstroms
     double epsilon; // kcal/mol
     double charge; 
+};
+
+const std::vector<AtomType> ATOM_TYPES = {
+    {"H", 1.008, 0.4000, 0.0460, 0.417},    // Type 0: Hydrogen
+    {"O", 15.999, 3.1506, 0.1521, -0.834},  // Type 1: Oxygen
+    {"Ar", 39.948, 3.405, 0.238, 0.0},      // Type 2: Argon
+    {"C_meth", 12.011, 3.50, 0.066, -0.24}, // Type 3: Carbon in Methane
+    {"H_meth", 1.008, 2.50, 0.030, 0.06}    // Type 4: Hydrogen in Methane
 };
 
 // Bond structure
@@ -46,12 +53,6 @@ struct Angle {
     double k; // Stiffness (kcal/mol/rad^2)
     double theta0; // Equilibrium angle (radians)
 };
-
-const std::vector<AtomType> ATOM_TYPES = {
-    {"H", 1.008, 0.4000, 0.0460, 0.417},    // Type 0: Hydrogen
-    {"O", 15.999, 3.1506, 0.1521, -0.834}   // Type 1: Oxygen
-};
-
 
 struct System {
     std::vector<double> x, y, z;
@@ -125,6 +126,91 @@ void init_water_box(System& sys, std::vector<Bond>& bonds, std::vector<Angle>& a
                 sys.exclusions[sys.id[p_idx + 2]].push_back(sys.id[p_idx + 1]);
 
                 p_idx += 3;
+            }
+        }
+    }
+}
+
+void init_argon_box(System& sys, int num_atoms, double L) {
+    int per_side = std::ceil(std::cbrt(num_atoms));
+    double spacing = L / per_side;
+    sys.resize(num_atoms);
+    
+    int p_idx = 0;
+    for (int x = 0; x < per_side; ++x) {
+        for (int y = 0; y < per_side; ++y) {
+            for (int z = 0; z < per_side; ++z) {
+                if (p_idx >= num_atoms) return;
+                
+                sys.id[p_idx] = p_idx;
+                sys.type[p_idx] = 2;
+                sys.x[p_idx] = x * spacing + spacing/2;
+                sys.y[p_idx] = y * spacing + spacing/2;
+                sys.z[p_idx] = z * spacing + spacing/2;
+                
+                p_idx++;
+            }
+        }
+    }
+}
+
+void init_methane_box(System& sys, std::vector<Bond>& bonds, std::vector<Angle>& angles, int num_molecules, double L) {
+    sys.resize(num_molecules * 5); // 1 C + 4 H
+    int idx = 0;
+    
+    // Grid layout
+    int per_side = std::ceil(std::cbrt(num_molecules));
+    double spacing = L / per_side;
+
+    for (int x = 0; x < per_side; ++x) {
+        for (int y = 0; y < per_side; ++y) {
+            for (int z = 0; z < per_side; ++z) {
+                if (idx + 4 >= sys.x.size()) return;
+
+                double cx = x * spacing + spacing/2;
+                double cy = y * spacing + spacing/2;
+                double cz = z * spacing + spacing/2;
+
+                int id_c = idx;
+                sys.type[id_c] = 3; 
+                sys.x[id_c] = cx; sys.y[id_c] = cy; sys.z[id_c] = cz;
+
+                double d = 1.09 / sqrt(3.0); 
+                
+                int id_h1 = idx+1; int id_h2 = idx+2; 
+                int id_h3 = idx+3; int id_h4 = idx+4;
+
+                sys.type[id_h1] = 4; sys.x[id_h1] = cx+d; sys.y[id_h1] = cy+d; sys.z[id_h1] = cz+d;
+                sys.type[id_h2] = 4; sys.x[id_h2] = cx-d; sys.y[id_h2] = cy-d; sys.z[id_h2] = cz+d;
+                sys.type[id_h3] = 4; sys.x[id_h3] = cx-d; sys.y[id_h3] = cy+d; sys.z[id_h3] = cz-d;
+                sys.type[id_h4] = 4; sys.x[id_h4] = cx+d; sys.y[id_h4] = cy-d; sys.z[id_h4] = cz-d;
+
+                double bond_k = 340.0;
+                double bond_len = 1.09;
+                bonds.push_back({id_c, id_h1, bond_k, bond_len});
+                bonds.push_back({id_c, id_h2, bond_k, bond_len});
+                bonds.push_back({id_c, id_h3, bond_k, bond_len});
+                bonds.push_back({id_c, id_h4, bond_k, bond_len});
+
+                double ang_k = 35.0;
+                double ang_eq = 109.5 * 3.14159 / 180.0;
+                
+                angles.push_back({id_h1, id_c, id_h2, ang_k, ang_eq});
+                angles.push_back({id_h1, id_c, id_h3, ang_k, ang_eq});
+                angles.push_back({id_h1, id_c, id_h4, ang_k, ang_eq});
+                angles.push_back({id_h2, id_c, id_h3, ang_k, ang_eq});
+                angles.push_back({id_h2, id_c, id_h4, ang_k, ang_eq});
+                angles.push_back({id_h3, id_c, id_h4, ang_k, ang_eq});
+
+                for (int i = 0; i < 5; ++i) {
+                    for (int j = 0; j < 5; ++j) {
+                        if (i != j) {
+                            sys.exclusions[idx + i].push_back(idx + j);
+                        }
+                    }
+                }
+
+                idx += 5;
             }
         }
     }
@@ -375,7 +461,7 @@ void randomize_velocities(System& sys, double temp) {
     std::normal_distribution<double> dist(0.0, 1.0);
     for (size_t i = 0; i < sys.x.size(); ++i) {
         double m = ATOM_TYPES[sys.type[i]].mass;
-        double sigma = std::sqrt(kb * temp / (m * F_TO_ACC / 4.184e-4));
+        double sigma = std::sqrt(kb * temp / m);
         sys.vx[i] = dist(get_rng());
         sys.vy[i] = dist(get_rng());
         sys.vz[i] = dist(get_rng());
@@ -473,17 +559,27 @@ struct RDF {
 int main() {
     Config config;
     config.load("config.txt");
+    std::string system_type = config.get_string("system_type", "water");
     int num_molecules = config.get_int("num_molecules", 1000);
-    double L = config.get_double("box_size", 31.0);
     double dt = config.get_double("timestep", 0.5);
     double t_max = config.get_double("total_time", 5000.0);
     double target_temp = config.get_double("temperature", 300.0);
     double CUTOFF = config.get_double("cutoff", 10.0);
     double SKIN = config.get_double("skin", 2.0);
-    const double CUTOFF_SQ = CUTOFF * CUTOFF;
-    const double VERLET_CUTOFF = CUTOFF + SKIN;
-    const double VERLET_CUTOFF_SQ = VERLET_CUTOFF * VERLET_CUTOFF;
+    double CUTOFF_SQ = CUTOFF * CUTOFF;
+    double VERLET_CUTOFF = CUTOFF + SKIN;
+    double VERLET_CUTOFF_SQ = VERLET_CUTOFF * VERLET_CUTOFF;
     double friction = config.get_double("friction", 1.0);
+
+    double volume_per_molecule = 30.0;
+    double target_volume = num_molecules * volume_per_molecule;
+    double L = std::cbrt(target_volume);
+    if (L < 3.0 * VERLET_CUTOFF) {
+        VERLET_CUTOFF = L / 3.001;
+        CUTOFF = VERLET_CUTOFF - SKIN;
+        CUTOFF_SQ = CUTOFF * CUTOFF;
+        VERLET_CUTOFF_SQ = VERLET_CUTOFF * VERLET_CUTOFF;
+    }
 
     std::filesystem::create_directory("dumps");
     std::filesystem::create_directory("outputs");
@@ -493,13 +589,32 @@ int main() {
     System sys;
     std::vector<Bond> bonds;
     std::vector<Angle> angles;
-    init_water_box(sys, bonds, angles, num_molecules, L);
+    if (system_type == "water") {
+        init_water_box(sys, bonds, angles, num_molecules, L);
+    } else if (system_type == "argon") {
+        init_argon_box(sys, num_molecules, L);
+    } else if (system_type == "methane") {
+        init_methane_box(sys, bonds, angles, num_molecules, L);
+    } else {
+        std::cerr << "Unsupported system type: " << system_type << "\n";
+        return 1;
+    }
 
     int grid_dim = std::floor(L / VERLET_CUTOFF); 
     if (grid_dim < 3) grid_dim = 3; 
     double cell_size = L / grid_dim;
 
     SystemGPU gpu;
+    int num_types = ATOM_TYPES.size();
+    std::vector<double> h_sigma(num_types);
+    std::vector<double> h_epsilon(num_types);
+    std::vector<double> h_charge(num_types);
+    for (int i = 0; i < num_types; ++i) {
+        h_sigma[i]   = ATOM_TYPES[i].sigma;
+        h_epsilon[i] = ATOM_TYPES[i].epsilon;
+        h_charge[i]  = ATOM_TYPES[i].charge;
+    }
+    gpu.set_atom_params(num_types, h_sigma.data(), h_epsilon.data(), h_charge.data());
     gpu.allocate(sys.x.size(), 1000, grid_dim);
 
     double bonded_pe = 0.0;
@@ -510,11 +625,9 @@ int main() {
     std::cout << "Warmup Started.\n";
     double dt_warmup = 0.01;
     double max_force = 100.0;
-    for (int i = 0; i < 2000; ++i) {
-        integrate_langevin_1(sys, dt_warmup, target_temp, friction, L);
-        std::fill(sys.vx.begin(), sys.vx.end(), 0.0);
-        std::fill(sys.vy.begin(), sys.vy.end(), 0.0);
-        std::fill(sys.vz.begin(), sys.vz.end(), 0.0);
+    double warmup_friction = 100.0;
+    for (int i = 0; i < 1000; ++i) {
+        integrate_langevin_1(sys, dt_warmup, target_temp, warmup_friction, L);
         build_and_compute_gpu(
             sys.x.size(),
             sys.x.data(), sys.y.data(), sys.z.data(), sys.type.data(),
@@ -524,6 +637,7 @@ int main() {
         double bonded_pe_dummy = 0;
         compute_bond_forces(sys, bonds, bonded_pe_dummy, L);
         compute_angle_forces(sys, angles, bonded_pe_dummy, L);
+        integrate_langevin_2(sys, dt_warmup, warmup_friction);
     }
     std::cout << "Warmup Done.\n";
 
@@ -571,7 +685,10 @@ int main() {
 
     }
     energy_file.close();
-    int num_type1 = num_molecules;
+    int num_type1 = 0;
+    for (size_t i = 0; i < sys.x.size(); ++i) {
+        if (sys.type[i] == 1) num_type1++;
+    }
     rdf.write_file("outputs/rdf.csv", L, num_type1);
 
     auto end_time = std::chrono::high_resolution_clock::now();

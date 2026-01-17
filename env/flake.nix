@@ -34,7 +34,6 @@
           packages = with pkgs; [
             clang-tools
             cppcheck
-            ovito
             python3
             python3Packages.pandas
             python3Packages.matplotlib

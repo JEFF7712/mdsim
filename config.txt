@@ -5,14 +5,14 @@
 # Temperature: Kelvin (K)
 # Force: kcal/mol/Å
 
-# Simulation Parameters
-num_molecules = 50
-box_size = 31.0
-timestep = 0.5
-total_time = 5000
-temperature = 5000.0
+# Simulation Type
+system_type = water
 
-# Physics
-cutoff = 10.0
+# Simulation Parameters
+num_molecules = 5000
+timestep = 0.05
+total_time = 5000
+temperature = 300.0
+cutoff = 8.0
 skin = 2.0
 friction = 1.0

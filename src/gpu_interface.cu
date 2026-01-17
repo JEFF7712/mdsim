@@ -167,7 +167,10 @@ __global__ void compute_forces_kernel(
     double L, 
     double CUTOFF_SQ,
     int max_neighbors,
-    double* d_energy
+    double* d_energy,
+    const double* __restrict__ param_sigma,
+    const double* __restrict__ param_epsilon,
+    const double* __restrict__ param_charge
 ) {
     __shared__ double shared_energy[256];
     
@@ -179,9 +182,6 @@ __global__ void compute_forces_kernel(
     double fyi = 0.0;
     double fzi = 0.0;
 
-    double sigmas[2] = {0.4000, 3.1506};
-    double epsilons[2] = {0.0460, 0.1521};
-    double charges[2] = {0.417, -0.834};
     const double MAX_FORCE = 10000.0;
 
     if (i < N) {
@@ -210,8 +210,15 @@ __global__ void compute_forces_kernel(
             if (r2 < CUTOFF_SQ && r2 > 0.0) {
                 int type_j = type[j];
 
-                double sigma = 0.5 * (sigmas[type_i] + sigmas[type_j]);
-                double epsilon = sqrt(epsilons[type_i] * epsilons[type_j]);
+                double sigma_i = param_sigma[type_i];
+                double sigma_j = param_sigma[type_j];
+                double eps_i = param_epsilon[type_i];
+                double eps_j = param_epsilon[type_j];
+                double q_i = param_charge[type_i];
+                double q_j = param_charge[type_j];
+
+                double sigma = 0.5 * (sigma_i + sigma_j);
+                double epsilon = sqrt(eps_i * eps_j);
 
                 double r = sqrt(r2 + 1e-10);
                 double inv_r2 = 1 / (r2 + 1e-10);
@@ -220,10 +227,8 @@ __global__ void compute_forces_kernel(
                 double sig_inv_r12 = sig_inv_r6 * sig_inv_r6;
                 double f_lj = (24.0 * epsilon * inv_r2) * (2.0 * sig_inv_r12 - sig_inv_r6);
 
-                double q1 = charges[type_i];
-                double q2 = charges[type_j];
-                double coulomb_force = (332.06 * q1 * q2) / r2;
-                double f_elec = coulomb_force * (1.0 / r);
+                double coulomb_force = (332.06 * q_i * q_j) / r2;
+                double f_elec = coulomb_force;
 
                 double f_total = f_lj + f_elec;
 
@@ -234,7 +239,7 @@ __global__ void compute_forces_kernel(
                 fyi += f_total * dy;
                 fzi += f_total * dz;
 
-                double pair_energy = 4.0 * epsilon * (sig_inv_r12 - sig_inv_r6) + (332.06 * q1 * q2) / r;
+                double pair_energy = 4.0 * epsilon * (sig_inv_r12 - sig_inv_r6) + (332.06 * q_i * q_j) / r;
                 local_energy += 0.5 * pair_energy;
             }
         }
@@ -326,7 +331,8 @@ void build_and_compute_gpu(
         N, gpu.d_x, gpu.d_y, gpu.d_z, gpu.d_type, 
         gpu.d_neighbor_list, gpu.d_num_neighbors, 
         gpu.d_fx, gpu.d_fy, gpu.d_fz, 
-        L, CUTOFF_SQ, gpu.max_neighbors, gpu.d_energy
+        L, CUTOFF_SQ, gpu.max_neighbors, gpu.d_energy,
+        gpu.d_sigma, gpu.d_epsilon, gpu.d_charge
     );
     
     cudaMemcpyAsync(h_fx, gpu.d_fx, N * sizeof(double), cudaMemcpyDeviceToHost, stream);
@@ -362,6 +368,16 @@ void SystemGPU::allocate(int num_atoms, int max_n, int grid_dim) {
 
 }
 
+void SystemGPU::set_atom_params(int num_types, const double* h_sigma, const double* h_epsilon, const double* h_charge) {
+    cudaMalloc(&d_sigma, num_types * sizeof(double));
+    cudaMalloc(&d_epsilon, num_types * sizeof(double));
+    cudaMalloc(&d_charge, num_types * sizeof(double));
+
+    cudaMemcpy(d_sigma, h_sigma, num_types * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_epsilon, h_epsilon, num_types * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_charge, h_charge, num_types * sizeof(double), cudaMemcpyHostToDevice);
+}
+
 void SystemGPU::cleanup() {
     cudaFree(d_x); cudaFree(d_y); cudaFree(d_z);
     cudaFree(d_fx); cudaFree(d_fy); cudaFree(d_fz);
@@ -370,4 +386,5 @@ void SystemGPU::cleanup() {
     cudaFree(d_cell_id_alt); cudaFree(d_particle_id_alt);
     cudaFree(d_cell_start); cudaFree(d_cell_end);
     cudaFree(d_energy);
+    cudaFree(d_sigma); cudaFree(d_epsilon); cudaFree(d_charge);
 }

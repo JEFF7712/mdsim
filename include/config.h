@@ -41,4 +41,9 @@ public:
         if (data.count(key)) return std::stoi(data.at(key));
         return default_val;
     }
+
+    std::string get_string(const std::string& key, const std::string& default_val) {
+        if (data.count(key)) return data.at(key);
+        return default_val;
+    }
 };
