@@ -65,7 +65,7 @@ struct System {
     void resize(int n) {
         x.resize(n); y.resize(n); z.resize(n);
         vx.resize(n); vy.resize(n); vz.resize(n);
-        fx.resize(n); fy.resize(n); fz.resize(n);
+        fx.resize(n, 0.0); fy.resize(n, 0.0); fz.resize(n, 0.0);
         type.resize(n);
         id.resize(n);
         exclusions.resize(n);
@@ -642,6 +642,17 @@ int main() {
     std::cout << "Warmup Done.\n";
 
     randomize_velocities(sys, target_temp);
+
+    std::cout << "Computing initial forces...\n";
+    build_and_compute_gpu(
+        sys.x.size(),
+        sys.x.data(), sys.y.data(), sys.z.data(), sys.type.data(),
+        sys.fx.data(), sys.fy.data(), sys.fz.data(),
+        gpu, L, CUTOFF_SQ, VERLET_CUTOFF_SQ, cell_size, grid_dim, &gpu_pe, true
+    );
+    bonded_pe = 0.0;
+    compute_bond_forces(sys, bonds, bonded_pe, L);
+    compute_angle_forces(sys, angles, bonded_pe, L);
 
     RDF rdf(10.0, 0.1);
 

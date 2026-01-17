@@ -11,7 +11,7 @@ system_type = water
 # Simulation Parameters
 num_molecules = 5000
 timestep = 0.05
-total_time = 5000
+total_time = 500
 temperature = 300.0
 cutoff = 8.0
 skin = 2.0
