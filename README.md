@@ -32,7 +32,11 @@ The engine simulates the following molecular systems:
 
 # Core Equations:
 ## 1. Equations of Motion (Langevin Dynamics)
-The engine uses Langevin Dynamics instead of standard Newtonian physics ($F=ma$). This simulates a system connected to a heat bath (thermostat) by adding friction and random thermal noise. $$ m_i \frac{d\mathbf{v}_i}{dt} = \underbrace{\mathbf{F}_{conservative}(\mathbf{r}_i)}_{\text{Forces from Atoms}} - \underbrace{\gamma \mathbf{v}_i}_{\text{Friction}} + \underbrace{\mathbf{R}_i(t)}_{\text{Random Noise}} $$
+The engine uses Langevin Dynamics instead of standard Newtonian physics ($F=ma$). This simulates a system connected to a heat bath (thermostat) by adding friction and random thermal noise. 
+
+$$ 
+m_i \frac{d\mathbf{v}_i}{dt} = \underbrace{\mathbf{F}_{conservative}(\mathbf{r}_i)}_{\text{Forces from Atoms}} - \underbrace{\gamma \mathbf{v}_i}_{\text{Friction}} + \underbrace{\mathbf{R}_i(t)}_{\text{Random Noise}} 
+$$
 
 ## 2. Non-Bonded Interactions (GPU)
 Calculated between all pairs of atoms (excluding bonded neighbors) that fall within the cutoff radius ($r < r_{cut}$).
@@ -61,17 +65,21 @@ The accuracy of the simulation was confirmed by computing the Radial Distributio
 ## Performance Improvements
 ### OpenMP Parallelization
 **Parameters:** 1000 molecules, 31.0 Å box length, 0.5 fs time step, 50.0 fs simulation time 
-| Configuration | Best Time | Improvement |
-|---|---|---|
-| Single-core (baseline) | 13.94 seconds | - |
-| OpenMP parallelization | 2.46 seconds | **82% faster** |
+| Configuration | Best Time |
+|---|---|
+| Single-core (baseline) | 13.94 seconds |
+| OpenMP parallelization | 2.46 seconds | 
+
+Improvement: **82% faster**.
 
 ### CUDA GPU Acceleration
 **Parameters:** 1000 molecules, 31.0 Å box length, 0.5 fs time step, 5000.0 fs simulation time
-| Configuration | Best Time | Improvement |
-|---|---|---|
-| OpenMP CPU | 245.12 seconds | - |
-| CUDA GPU | 70.26 seconds | **71% faster** |
+| Configuration | Best Time |
+|---|---|
+| OpenMP CPU | 245.12 seconds |
+| CUDA GPU | 70.26 seconds |
+
+Improvement: **71% faster**.
 
 # Resources
 Here are some resources I used to learn and help write the code.
