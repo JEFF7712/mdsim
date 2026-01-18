@@ -1,6 +1,8 @@
 # Custom Molecular Dynamics Engine
 A high-performance Molecular Dynamics (MD) engine written in C++ and CUDA. It uses a hybrid architecture where bond/angle forces are calculated on the CPU (OpenMP) and non-bonded interactions (Lennard-Jones + Coulomb) are accelerated on the GPU.
 
+https://github.com/user-attachments/assets/e3d36321-2654-4c1b-83cc-ce1c16d7f594
+---
 ## Features:
 
 ### Hybrid Parallelization
@@ -17,8 +19,8 @@ I used a spatial hashing algorithm on the GPU to avoid the $O(N^2)$ cost of chec
 3. **Indexing:** A lookup table (cell_start, cell_end) is generated to map cell IDs to start/end indices in the sorted atom array.
 4. **Adjacency Build:** For every atom, the kernel searches only the 27 adjacent cells (3x3x3 block). Neighbors within $r < r_{cut} + \text{skin}$ are stored in a fixed-width adjacency list per atom.
 
-### Built-in Systems
-The engine has built-in support for simulating the following molecular systems:
+### Systems
+The engine simulates the following molecular systems:
 - **Water (H₂O):** Includes proper bonding and angle parameters for water molecules
 - **Argon (Ar):** Monatomic noble gas simulations
 - **Methane (CH₄):** Multi-atom hydrocarbon simulations with bonding
