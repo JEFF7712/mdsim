@@ -86,7 +86,7 @@ Here are some resources I used to learn and help write the code.
 - **Used this as a starting point:** [Molecular Dynamics Simulation Introduction](https://youtu.be/ChQbBqndwIA?si=14Vq-WGgh8yWk7DQ)
 - **Textbook:** [Understanding Molecular Simulation - Frenkel & Smit](https://www.eng.uc.edu/~beaucag/Classes/AdvancedMaterialsThermodynamics/Books/%5BComputational%20science%20(San%20Diego,%20Calif.)%5D%20Daan%20Frenkel_%20Berend%20Smit%20-%20Understanding%20molecular%20simulation%20_%20from%20algorithms%20to%20applications%20(2002,%20Academic%20Press%20)%20-%20libgen.lc.pdf)
 - **C++:** [LearnCpp.com](https://www.learncpp.com/)
-- **Good Video on CUDA Basics:** [CUDA Programming Tutorial](https://youtu.be/xwbD6fL5qC8?si=ivaTzz3BVbgJdFsF)
+- **Good video on CUDA basics:** [CUDA Programming Tutorial](https://youtu.be/xwbD6fL5qC8?si=ivaTzz3BVbgJdFsF)
 
 # Future improvements
 - Move bond/angle force computing onto GPU for improved performance
