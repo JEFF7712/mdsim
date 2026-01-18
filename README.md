@@ -4,7 +4,9 @@ A high-performance Molecular Dynamics (MD) engine written in C++ and CUDA. It us
 <video src="https://github.com/user-attachments/assets/e3d36321-2654-4c1b-83cc-ce1c16d7f594" controls>
   Your browser does not support the video tag.
 </video>
+
 Using [OVITO](https://www.ovito.org/) for the visualization.
+
 ---
 
 ## Features:
