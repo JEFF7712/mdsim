@@ -1,7 +1,8 @@
 # Custom Molecular Dynamics Engine
 A high-performance Molecular Dynamics (MD) engine written in C++ and CUDA. It uses a hybrid architecture where bond/angle forces are calculated on the CPU (OpenMP) and non-bonded interactions (Lennard-Jones + Coulomb) are accelerated on the GPU.
-
-https://github.com/user-attachments/assets/e3d36321-2654-4c1b-83cc-ce1c16d7f594
+<video src="https://github.com/user-attachments/assets/e3d36321-2654-4c1b-83cc-ce1c16d7f594" controls>
+  Your browser does not support the video tag.
+</video>
 ---
 ## Features:
 
