@@ -1,9 +1,12 @@
 # Custom Molecular Dynamics Engine
 A high-performance Molecular Dynamics (MD) engine written in C++ and CUDA. It uses a hybrid architecture where bond/angle forces are calculated on the CPU (OpenMP) and non-bonded interactions (Lennard-Jones + Coulomb) are accelerated on the GPU.
+
 <video src="https://github.com/user-attachments/assets/e3d36321-2654-4c1b-83cc-ce1c16d7f594" controls>
   Your browser does not support the video tag.
 </video>
+Using [OVITO](https://www.ovito.org/) for the visualization.
 ---
+
 ## Features:
 
 ### Hybrid Parallelization
@@ -12,9 +15,8 @@ A high-performance Molecular Dynamics (MD) engine written in C++ and CUDA. It us
     * Threads: Dynamic scheduling with `#pragma omp parallel for`.
     * Synchronization: Forces are computed independently on CPU/GPU and summed into a shared force array before the integration step.
 
-### GPU Neighbor Searching (Cell-Linked List):
+### GPU Neighbor Searching (Cell-Linked List)
 I used a spatial hashing algorithm on the GPU to avoid the $O(N^2)$ cost of checking every atom pair.
-
 1. **Binning:** The simulation box is divided into cubic cells of side length $d \ge r_{cut} + \text{skin}$. Each atom is hashed to a 1D cell index $k = x_{grid} + y_{grid} \cdot D + z_{grid} \cdot D^2$.
 2. **Sorting:** Atoms are sorted by cell ID using CUB Radix Sort.
 3. **Indexing:** A lookup table (cell_start, cell_end) is generated to map cell IDs to start/end indices in the sorted atom array.
@@ -57,7 +59,6 @@ The accuracy of the simulation was confirmed by computing the Radial Distributio
 ## Performance Improvements
 ### OpenMP Parallelization
 **Parameters:** 1000 molecules, 31.0 Å box length, 0.5 fs time step, 50.0 fs simulation time 
-
 | Configuration | Best Time | Improvement |
 |---|---|---|
 | Single-core (baseline) | 13.94 seconds | - |
@@ -65,22 +66,18 @@ The accuracy of the simulation was confirmed by computing the Radial Distributio
 
 ### CUDA GPU Acceleration
 **Parameters:** 1000 molecules, 31.0 Å box length, 0.5 fs time step, 5000.0 fs simulation time
-
 | Configuration | Best Time | Improvement |
 |---|---|---|
 | OpenMP CPU | 245.12 seconds | - |
 | CUDA GPU | 70.26 seconds | **71% faster** |
 
 # Resources
-
 Here are some resources I used to learn and help write the code.
-
 - **Used this as a starting point:** [Molecular Dynamics Simulation Introduction](https://youtu.be/ChQbBqndwIA?si=14Vq-WGgh8yWk7DQ)
 - **Textbook:** [Understanding Molecular Simulation - Frenkel & Smit](https://www.eng.uc.edu/~beaucag/Classes/AdvancedMaterialsThermodynamics/Books/%5BComputational%20science%20(San%20Diego,%20Calif.)%5D%20Daan%20Frenkel_%20Berend%20Smit%20-%20Understanding%20molecular%20simulation%20_%20from%20algorithms%20to%20applications%20(2002,%20Academic%20Press%20)%20-%20libgen.lc.pdf)
 - **C++:** [LearnCpp.com](https://www.learncpp.com/)
 - **Good Video on CUDA Basics:** [CUDA Programming Tutorial](https://youtu.be/xwbD6fL5qC8?si=ivaTzz3BVbgJdFsF)
 
 # Future improvements
-
 - Move bond/angle force computing onto GPU for improved performance
 - Implement NPT (isothermal-isobaric) ensemble for pressure control
