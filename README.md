@@ -51,12 +51,19 @@ $$V_{bond}(r) = \frac{1}{2} k_b (r - r_0)^2$$
 ### B. Harmonic Angles (3-Body)
 $$V_{angle}(\theta) = \frac{1}{2} k_\theta (\theta - \theta_0)^2$$
 
-## 4. Integration Scheme
-The engine solves these differential equations using a discrete time step ($\Delta t$).
-1. **Half-Kick:** $\mathbf{v}(t + \frac{1}{2}\Delta t) = \mathbf{v}(t) + \frac{1}{2} \mathbf{a}(t) \Delta t$
-2. **Drift:** $\mathbf{r}(t + \Delta t) = \mathbf{r}(t) + \mathbf{v}(t + \frac{1}{2}\Delta t) \Delta t$
-3. **Compute Forces:** $\mathbf{a}(t + \Delta t) = \mathbf{F}(\mathbf{r}(t + \Delta t)) / m$
-4. **Half-Kick:** $\mathbf{v}(t + \Delta t) = \mathbf{v}(t + \frac{1}{2}\Delta t) + \frac{1}{2} \mathbf{a}(t + \Delta t) \Delta t$
+## 4. Integration Scheme (BAOAB Langevin)
+The engine utilizes the BAOAB splitting method to integrate the Langevin equations of motion. The discrete update steps per iteration ($\Delta t$) are:
+1. **Half-Kick (B):** Update velocity by half the force.
+   $$\mathbf{v}^* = \mathbf{v}(t) + \frac{1}{2} \mathbf{a}(t) \Delta t$$
+2. **Thermostat (O):** Apply friction and thermal noise.
+   $$\mathbf{v}^{**} = c_1 \mathbf{v}^* + c_2 \mathbf{v}_{th} \mathbf{\xi}$$
+   *Where $c_1 = e^{-\gamma \Delta t}$, $c_2 = \sqrt{1 - c_1^2}$, and $\xi$ is Gaussian noise.*
+3. **Drift (A):** Update position using the velocity.
+   $$\mathbf{r}(t + \Delta t) = \mathbf{r}(t) + \mathbf{v}^{**} \Delta t$$
+4. **Compute Forces:** Recalculate forces at the new position.
+   $$\mathbf{a}(t + \Delta t) = \mathbf{F}(\mathbf{r}(t + \Delta t)) / m$$
+5. **Half-Kick (B):** Update velocity by the remaining force.
+   $$\mathbf{v}(t + \Delta t) = \mathbf{v}^{**} + \frac{1}{2} \mathbf{a}(t + \Delta t) \Delta t$$
 
 ## Validation
 ### Radial Distribution Function (RDF)
