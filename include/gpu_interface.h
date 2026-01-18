@@ -1,12 +1,12 @@
 #ifndef GPU_INTERFACE_H
 #define GPU_INTERFACE_H
 
+#include <vector>
 #include <cuda_runtime.h>
 
 struct SystemGPU {
-    // Atom Data
-    double *d_x, *d_y, *d_z;
-    double *d_fx, *d_fy, *d_fz;
+    float *d_x, *d_y, *d_z;
+    float *d_fx, *d_fy, *d_fz;
     int *d_type;
     
     int *d_neighbor_list; 
@@ -20,38 +20,46 @@ struct SystemGPU {
     int *d_cell_start;
     int *d_cell_end;
 
-    int N; // Number of atoms
+    int N;
     int max_neighbors;
     int num_cells;
 
-    double *d_sigma;
-    double *d_epsilon;
-    double *d_charge;
+    float *d_sigma;
+    float *d_epsilon;
+    float *d_charge;
 
-    double *d_energy;
+    float *d_energy;
+
+    int *d_exclusion_list;
+    int *d_exclusion_start;
+    int *d_exclusion_count;
+    int max_exclusions_per_atom;
 
     void allocate(int num_atoms, int max_n, int grid_dim);
     void cleanup();
-    void set_atom_params(int num_types, const double* h_sigma, const double* h_epsilon, const double* h_charge);
+    void set_atom_params(int num_types, const float* h_sigma, const float* h_epsilon, const float* h_charge);
+    void set_exclusions(int num_atoms, const std::vector<std::vector<int>>& exclusion_list);
 };
 
 void build_and_compute_gpu(
     int N,
-    const double* h_x, 
-    const double* h_y, 
-    const double* h_z, 
+    const float* h_x, 
+    const float* h_y, 
+    const float* h_z, 
     const int* h_type,
-    double* h_fx, 
-    double* h_fy, 
-    double* h_fz,
+    float* h_fx, 
+    float* h_fy, 
+    float* h_fz,
     SystemGPU& gpu,
-    double L, 
-    double CUTOFF_SQ,
-    double VERLET_CUTOFF_SQ,
-    double GRID_CELL_SIZE, 
+    float L, 
+    float CUTOFF_SQ,
+    float VERLET_CUTOFF_SQ,
+    float GRID_CELL_SIZE, 
     int GRID_DIM,
-    double* h_gpu_pe,
-    bool rebuild
+    int atoms_per_molecule,
+    float* h_gpu_pe,
+    bool rebuild,
+    const std::vector<std::vector<int>>& exclusions
 );
 
 #endif

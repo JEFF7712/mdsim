@@ -10,7 +10,7 @@ find_package(OpenMP REQUIRED)
 
 add_library(gpu_lib OBJECT src/gpu_interface.cu)
 target_include_directories(gpu_lib PRIVATE include)
-target_compile_options(gpu_lib PRIVATE -O3 --use_fast_math)
+target_compile_options(gpu_lib PRIVATE -O3)
 set_property(TARGET gpu_lib PROPERTY CUDA_ARCHITECTURES 86)
 set_property(TARGET gpu_lib PROPERTY POSITION_INDEPENDENT_CODE ON)
 
@@ -20,4 +20,4 @@ set_property(TARGET main PROPERTY CUDA_ARCHITECTURES 86)
 
 target_link_libraries(main PRIVATE gpu_lib OpenMP::OpenMP_CXX)
 target_include_directories(main PRIVATE include)
-target_compile_options(main PRIVATE -O3 -march=native -ffast-math -fopenmp)
+target_compile_options(main PRIVATE -O3 -march=native -fopenmp)

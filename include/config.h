@@ -19,7 +19,6 @@ public:
 
         std::string line;
         while (std::getline(file, line)) {
-            // Remove comments (lines starting with #)
             if (line.empty() || line[0] == '#') continue;
 
             std::istringstream iss(line);
